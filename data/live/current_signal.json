@@ -1,0 +1,87 @@
+{
+  "profile": {
+    "ema_fast": 8,
+    "ema_slow": 34,
+    "rsi_period": 14,
+    "atr_period": 14,
+    "atr_multiplier": 0.8,
+    "risk_reward": 0.4,
+    "min_atr_pct": 0.0005,
+    "max_atr_pct": 0.05,
+    "funding_abs_limit": 0.01,
+    "min_confidence": 0.54,
+    "long_rsi_min": 46,
+    "long_rsi_max": 79,
+    "short_rsi_min": 21,
+    "short_rsi_max": 54
+  },
+  "count": 7,
+  "top": [
+    {
+      "symbol": "ADAUSDT",
+      "timeframe": "5m",
+      "side": "LONG",
+      "entry": 0.2733,
+      "tp": 0.273564,
+      "sl": 0.27264,
+      "confidence": 0.9031,
+      "score": 0.7278726900971777,
+      "rr": 0.3999999999999832
+    },
+    {
+      "symbol": "SOLUSDT",
+      "timeframe": "5m",
+      "side": "LONG",
+      "entry": 80.85,
+      "tp": 80.922638,
+      "sl": 80.668406,
+      "confidence": 0.8807,
+      "score": 0.7003369021820776,
+      "rr": 0.4000022027160371
+    },
+    {
+      "symbol": "ETHUSDT",
+      "timeframe": "5m",
+      "side": "LONG",
+      "entry": 1930.39,
+      "tp": 1931.935472,
+      "sl": 1926.52632,
+      "confidence": 0.8677,
+      "score": 0.681136583739158,
+      "rr": 0.39999999999992936
+    },
+    {
+      "symbol": "ETHUSDT",
+      "timeframe": "1m",
+      "side": "LONG",
+      "entry": 1930.39,
+      "tp": 1931.262821,
+      "sl": 1928.207947,
+      "confidence": 0.869,
+      "score": 0.6549491398863564,
+      "rr": 0.39999990834316684
+    },
+    {
+      "symbol": "SOLUSDT",
+      "timeframe": "1m",
+      "side": "LONG",
+      "entry": 80.86,
+      "tp": 80.894292,
+      "sl": 80.774271,
+      "confidence": 0.78,
+      "score": 0.5850770915381517,
+      "rr": 0.40000466586561495
+    }
+  ],
+  "chosen": {
+    "symbol": "ADAUSDT",
+    "timeframe": "5m",
+    "side": "LONG",
+    "entry": 0.2733,
+    "tp": 0.273564,
+    "sl": 0.27264,
+    "confidence": 0.9031,
+    "score": 0.7278726900971777,
+    "rr": 0.3999999999999832
+  }
+}

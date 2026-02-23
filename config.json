@@ -1,0 +1,92 @@
+{
+  "account": {
+    "starting_balance_usd": 10.0,
+    "risk_per_trade_pct": 0.02
+  },
+  "execution": {
+    "fee_bps_per_side": 0.0,
+    "slippage_bps_per_side": 0.0
+  },
+  "pairs": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT"
+  ],
+  "timeframes": [
+    "1m",
+    "5m",
+    "15m"
+  ],
+  "strategy": {
+    "lookback_candles": 220,
+    "ema_fast": 8,
+    "ema_slow": 55,
+    "rsi_period": 14,
+    "atr_period": 14,
+    "atr_multiplier": 1.2,
+    "risk_reward": 0.5,
+    "min_atr_pct": 0.0015,
+    "max_atr_pct": 0.03,
+    "funding_abs_limit": 0.001,
+    "min_confidence": 0.8,
+    "long_rsi_min": 55,
+    "long_rsi_max": 72,
+    "short_rsi_min": 28,
+    "short_rsi_max": 48
+  },
+  "scanner": {
+    "poll_seconds": 20,
+    "enable_sound": true
+  },
+  "data_source": {
+    "allow_mock_fallback": false,
+    "force_mock": false,
+    "mock_seed": 42
+  },
+  "validation": {
+    "symbol": "BTCUSDT",
+    "timeframe": "5m",
+    "history_limit": 1500,
+    "target_closed_trades": 10
+  },
+  "live_loop": {
+    "symbols": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "SOLUSDT",
+      "XRPUSDT",
+      "ADAUSDT",
+      "BNBUSDT",
+      "DOGEUSDT",
+      "LINKUSDT",
+      "AVAXUSDT",
+      "TRXUSDT"
+    ],
+    "timeframes": [
+      "1m",
+      "5m",
+      "15m"
+    ],
+    "lookback_candles": 260,
+    "poll_seconds": 12,
+    "max_wait_minutes_per_trade": 5,
+    "min_rr_floor": 0.2,
+    "min_trend_strength": 0.0004,
+    "top_n": 3,
+    "target_trades": 3,
+    "target_win_rate": 0.75,
+    "min_trades_for_success": 3,
+    "max_cycles": 500
+  },
+  "ml": {
+    "last_walk_forward": {
+      "selected_trades": 200,
+      "wins": 139,
+      "losses": 61,
+      "win_rate": 0.695,
+      "expectancy_r": 0.0425
+    }
+  }
+}
