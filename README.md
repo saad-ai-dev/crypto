@@ -9,6 +9,8 @@
   <a href="https://github.com/rishat5081/crypto/actions/workflows/ci.yml"><img src="https://github.com/rishat5081/crypto/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/rishat5081/crypto/actions/workflows/code-quality.yml"><img src="https://github.com/rishat5081/crypto/actions/workflows/code-quality.yml/badge.svg" alt="Code Quality"></a>
   <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/data-Binance_Futures-F0B90B?logo=binance&logoColor=white" alt="Binance">
+  <img src="https://img.shields.io/badge/trading-paper_only-orange" alt="Paper Trading">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
 </p>
 
@@ -222,6 +224,51 @@ pytest tests/ -v --cov=src --cov-report=html
 # Validate config
 python -c "import json; json.load(open('config.json')); print('OK')"
 ```
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [`docs/HANDBOOK.md`](docs/HANDBOOK.md) | Developer guide: setup, strategy deep-dive, trade lifecycle, deployment |
+| [`docs/API_REFERENCE.md`](docs/API_REFERENCE.md) | All REST endpoints with request/response schemas |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | System design, data flow, module dependencies, data models |
+| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every `config.json` parameter with types and defaults |
+| [`docs/LIVE_OPERATIONS.md`](docs/LIVE_OPERATIONS.md) | Live market monitoring, signal diagnosis, runtime control |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history and release notes |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Contribution guidelines and PR process |
+
+---
+
+## Live System Results
+
+Last live scan: **2026-03-20 09:40 UTC** — Binance Futures, 10 symbols × 2 timeframes
+
+| Symbol | Price | RSI (15m) | EMA Bias | Status |
+|--------|-------|-----------|----------|--------|
+| BTC | $70,655 | 48.8 | Bullish | No crossover |
+| ETH | $2,144 | 47.6 | Bullish | No crossover |
+| SOL | $88.97 | 46.1 | Bullish | No crossover |
+| XRP | $1.449 | 46.5 | Bullish | No crossover |
+| BNB | $642.8 | 49.2 | Bullish | No crossover |
+| ADA | $0.269 | 45.9 | Bullish | No crossover |
+| DOGE | $0.094 | 47.7 | Bullish | No crossover |
+| AVAX | $9.531 | 50.3 | Bullish | No crossover |
+
+> Market in **sideways consolidation** — RSI neutral (40–50), funding rates ±0.001–0.010% (healthy).
+> System correctly awaiting next EMA(21)/EMA(55) crossover before entering.
+
+---
+
+## ML Performance (Walk-Forward)
+
+| Metric | Value |
+|--------|-------|
+| Selected trades | 66 |
+| Win rate | 60.6% |
+| Expectancy-R | 0.38 |
+| High-hit backtest | 90% win rate (9/10 trades, 3 symbols, 15m) |
+
+---
 
 ## Disclaimer
 

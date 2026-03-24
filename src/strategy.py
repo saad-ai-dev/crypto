@@ -83,10 +83,6 @@ class StrategyEngine:
 
         # Align: ema_series for period P returns len(close)-P+1 values.
         # We need the last ``crossover_lookback + 1`` aligned pairs.
-        fast_offset = self.params.ema_fast - 1
-        slow_offset = self.params.ema_slow - 1
-        # Map index i in close_prices -> fast_series[i - fast_offset], slow_series[i - slow_offset]
-        n = len(close_prices)
         look = min(crossover_lookback + 1, len(fast_series), len(slow_series))
         recent_diffs = []
         for k in range(look):

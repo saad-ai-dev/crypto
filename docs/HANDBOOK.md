@@ -313,3 +313,36 @@ Creates systemd service `crypto-trader` that:
 | Filters too tight | Feedback loop over-tightened | Relaxation kicks in after 6 blocked cycles, or manually edit config |
 | WIN classified as LOSS | Missing `pnl_r > 0` check | Fixed in `models.py:OpenTrade.update_with_candle()` |
 | Dashboard not updating | JSONL file not being written | Check bot is running and `tee` is piping to the file |
+
+---
+
+## Known API Behaviors
+
+These are confirmed from live testing against Binance Futures:
+
+### `BinanceFuturesRestClient`
+
+| Method | Return type | Notes |
+|--------|-------------|-------|
+| `fetch_all_ticker_prices()` | `dict[str, float]` | Keyed by symbol, e.g. `{"BTCUSDT": 70655.5}` — not a list |
+| `fetch_market_context(symbol)` | `MarketContext` | Fields: `mark_price`, `funding_rate`, `open_interest` only |
+| `fetch_klines(symbol, interval, limit)` | `list[Candle]` | Returns up to `limit` candles; check `len >= 60` before use |
+| `fetch_all_premium_index()` | `dict` | Bulk funding rate fetch — used by `_refresh_batch_market_data()` |
+
+### `MarketContext` fields
+
+```python
+ctx.mark_price    # float — futures mark price
+ctx.funding_rate  # float — current funding rate (e.g. -0.0000154)
+ctx.open_interest # float — total open contracts
+# ctx.index_price does NOT exist
+```
+
+### Output buffering
+
+When redirecting stdout to a file, Python may buffer output. Always use:
+```bash
+python3 -u run_live_adaptive.py 2>&1 | tee data/session.log
+```
+
+See [`docs/LIVE_OPERATIONS.md`](LIVE_OPERATIONS.md) for the complete operations guide.

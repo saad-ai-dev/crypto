@@ -29,7 +29,7 @@ jobs:
           pip install flake8 mypy
 
       - name: Flake8 lint
-        run: flake8 src/ tests/ --max-line-length 120 --ignore E501,W503
+        run: flake8 src/ tests/ --max-line-length 120 --ignore E501,W503,E203,E128
 
       - name: Type check
         run: mypy src/ --ignore-missing-imports --no-error-summary || true

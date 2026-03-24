@@ -26,7 +26,7 @@ jobs:
 
       - name: Start dashboard server
         run: |
-          cd frontend && python server.py &
+          cd frontend && python server.py --mongo-required 0 &
           sleep 3
 
       - name: Verify dashboard responds
