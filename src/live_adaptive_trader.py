@@ -42,6 +42,7 @@ class LiveAdaptivePaperTrader:
 
         # Binance order executor (demo or live)
         self.executor = BinanceExecutor.from_env(config)
+        self._close_orphaned_positions()
 
         self.strategy_payload = copy.deepcopy(config["strategy"])
         self.base_strategy = StrategyEngine.from_dict(copy.deepcopy(config["strategy"]))
@@ -416,6 +417,41 @@ class LiveAdaptivePaperTrader:
             "price": float(tick["price"]),
             "time": int(tick.get("time", 0)),
         }
+
+    def _close_orphaned_positions(self) -> None:
+        """Close any Binance positions left open from a previous crash/restart."""
+        if not self.executor.enabled:
+            return
+        try:
+            account = self.executor.get_account()
+            positions = account.get("positions", [])
+            for p in positions:
+                amt = float(p.get("positionAmt", 0))
+                if amt == 0:
+                    continue
+                symbol = p["symbol"]
+                side = "LONG" if amt > 0 else "SHORT"
+                pnl = float(p.get("unrealizedProfit", 0))
+                print(
+                    json.dumps({
+                        "type": "BINANCE_ORDER",
+                        "time": self._now_iso(),
+                        "action": "ORPHAN_CLOSE",
+                        "symbol": symbol,
+                        "side": side,
+                        "pnl": pnl,
+                    })
+                )
+                self.executor.close_trade(symbol, side, "ORPHAN_CLEANUP")
+        except Exception as exc:
+            print(
+                json.dumps({
+                    "type": "BINANCE_ORDER",
+                    "time": self._now_iso(),
+                    "action": "ORPHAN_CHECK_FAILED",
+                    "error": str(exc),
+                })
+            )
 
     def _signal_candidates(self) -> List[CandidateSignal]:
         candidates: List[CandidateSignal] = []
@@ -1159,45 +1195,88 @@ class LiveAdaptivePaperTrader:
             )
 
             # Execute on Binance (demo or live)
-            exec_result = {"executed": False}
+            binance_opened = False
+            binance_closed = False
             if self.executor.enabled:
-                exec_result = self.executor.open_trade(
-                    symbol=selected.signal.symbol,
-                    side=selected.signal.side,
-                    entry_price=selected.signal.entry,
-                    stop_loss=selected.signal.stop_loss,
-                    take_profit=selected.signal.take_profit,
-                )
-                print(
-                    json.dumps({
-                        "type": "BINANCE_ORDER",
-                        "time": self._now_iso(),
-                        "action": "OPEN",
-                        "symbol": selected.signal.symbol,
-                        "side": selected.signal.side,
-                        "result": exec_result,
-                    })
-                )
+                try:
+                    exec_result = self.executor.open_trade(
+                        symbol=selected.signal.symbol,
+                        side=selected.signal.side,
+                        entry_price=selected.signal.entry,
+                        stop_loss=selected.signal.stop_loss,
+                        take_profit=selected.signal.take_profit,
+                    )
+                    binance_opened = exec_result.get("executed", False)
+                    print(
+                        json.dumps({
+                            "type": "BINANCE_ORDER",
+                            "time": self._now_iso(),
+                            "action": "OPEN",
+                            "symbol": selected.signal.symbol,
+                            "side": selected.signal.side,
+                            "result": exec_result,
+                        })
+                    )
+                except Exception as exc:
+                    print(
+                        json.dumps({
+                            "type": "BINANCE_ORDER",
+                            "time": self._now_iso(),
+                            "action": "OPEN_FAILED",
+                            "symbol": selected.signal.symbol,
+                            "error": str(exc),
+                        })
+                    )
 
             closed = self._wait_for_close(selected.signal)
 
-            # Close position on Binance
-            if self.executor.enabled and exec_result.get("executed"):
-                close_result = self.executor.close_trade(
-                    symbol=closed.symbol,
-                    side=closed.side,
-                    reason=closed.reason,
-                )
-                print(
-                    json.dumps({
-                        "type": "BINANCE_ORDER",
-                        "time": self._now_iso(),
-                        "action": "CLOSE",
-                        "symbol": closed.symbol,
-                        "side": closed.side,
-                        "result": close_result,
-                    })
-                )
+            # Always try to close on Binance — check for position regardless of open result
+            if self.executor.enabled:
+                try:
+                    # Check if there's actually a position to close
+                    has_position = self.executor.has_open_position(closed.symbol)
+                    if has_position:
+                        close_result = self.executor.close_trade(
+                            symbol=closed.symbol,
+                            side=closed.side,
+                            reason=closed.reason,
+                        )
+                        binance_closed = close_result.get("executed", False)
+                        print(
+                            json.dumps({
+                                "type": "BINANCE_ORDER",
+                                "time": self._now_iso(),
+                                "action": "CLOSE",
+                                "symbol": closed.symbol,
+                                "side": closed.side,
+                                "result": close_result,
+                            })
+                        )
+                        # Verify position is actually closed
+                        if not binance_closed or self.executor.has_open_position(closed.symbol):
+                            # Force close with retry
+                            time.sleep(1)
+                            retry = self.executor.close_trade(closed.symbol, closed.side, "RETRY_CLOSE")
+                            binance_closed = retry.get("executed", False)
+                            print(
+                                json.dumps({
+                                    "type": "BINANCE_ORDER",
+                                    "time": self._now_iso(),
+                                    "action": "RETRY_CLOSE",
+                                    "symbol": closed.symbol,
+                                    "result": retry,
+                                })
+                            )
+                except Exception as exc:
+                    print(
+                        json.dumps({
+                            "type": "BINANCE_ORDER",
+                            "time": self._now_iso(),
+                            "action": "CLOSE_FAILED",
+                            "symbol": closed.symbol,
+                            "error": str(exc),
+                        })
+                    )
 
             self._record_trade(closed)
             self._apply_feedback(closed)
@@ -1212,7 +1291,8 @@ class LiveAdaptivePaperTrader:
                         "cycle": cycles,
                         "trade": asdict(closed),
                         "summary": self._summary(),
-                        "binance_executed": exec_result.get("executed", False),
+                        "binance_executed": binance_opened,
+                        "binance_closed": binance_closed,
                     }
                 )
             )
