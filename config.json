@@ -113,7 +113,22 @@
       "XMRUSDT",
       "HYPEUSDT",
       "ONTUSDT",
-      "DUSKUSDT"
+      "DUSKUSDT",
+      "1000PEPEUSDT",
+      "ALGOUSDT",
+      "1000SHIBUSDT",
+      "HBARUSDT",
+      "RENDERUSDT",
+      "TRUMPUSDT",
+      "TAOUSDT",
+      "WIFUSDT",
+      "PENGUUSDT",
+      "ZROUSDT",
+      "SUPERUSDT",
+      "1000BONKUSDT",
+      "WLDUSDT",
+      "SXPUSDT",
+      "DRIFTUSDT"
     ],
     "timeframes": [
       "5m",
