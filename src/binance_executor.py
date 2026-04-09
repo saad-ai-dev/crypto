@@ -85,12 +85,15 @@ class BinanceExecutor:
             enabled=bool(api_key and secret_key),
         )
 
-        # Fetch real balance and size conservatively: 0.5% risk, 5% max position
+        account_cfg = config.get("account", {})
+        risk_per_trade_pct = float(account_cfg.get("risk_per_trade_pct", 0.02))
+
+        # Fetch real balance and size using configured wallet risk percentage.
         if executor.enabled:
             try:
                 live_balance = executor.get_balance()
-                executor.risk_per_trade_usd = live_balance * 0.005  # 0.5% risk
-                executor.max_position_usd = live_balance * 0.05     # 5% max position
+                executor.risk_per_trade_usd = live_balance * risk_per_trade_pct
+                executor.max_position_usd = live_balance * 0.05
             except Exception:
                 pass
 

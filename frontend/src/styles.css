@@ -985,6 +985,33 @@ select {
   margin-top: 4px;
 }
 
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.015);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.pagination-actions {
+  display: flex;
+  gap: 10px;
+}
+
+.pagination-button {
+  min-width: 102px;
+}
+
+.pagination-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .watch-chip {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1022,6 +1049,46 @@ select {
   border: 1px solid rgba(255, 255, 255, 0.07);
   background: rgba(255, 255, 255, 0.01);
   line-height: 1.6;
+}
+
+.config-panel {
+  margin-top: 18px;
+}
+
+.config-sections {
+  display: grid;
+  gap: 18px;
+}
+
+.config-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+}
+
+.config-field {
+  display: grid;
+  gap: 8px;
+}
+
+.config-field span {
+  font-size: 0.82rem;
+  color: #d9e0e6;
+  font-weight: 700;
+}
+
+.config-field small {
+  color: var(--muted);
+  font-size: 0.75rem;
 }
 
 .empty-panel {

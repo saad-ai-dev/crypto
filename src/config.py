@@ -36,6 +36,18 @@ def validate_config(cfg: Dict[str, Any]) -> List[str]:
         if key not in ll:
             errors.append(f"Missing live_loop key: '{key}'")
 
+    account = cfg.get("account", {})
+    starting_balance = account.get("starting_balance_usd")
+    risk_per_trade_pct = account.get("risk_per_trade_pct")
+    paper_risk_usd = account.get("paper_risk_usd")
+
+    if starting_balance is not None and float(starting_balance) <= 0:
+        errors.append("account.starting_balance_usd must be > 0")
+    if risk_per_trade_pct is not None and float(risk_per_trade_pct) <= 0:
+        errors.append("account.risk_per_trade_pct must be > 0")
+    if paper_risk_usd is not None and float(paper_risk_usd) <= 0:
+        errors.append("account.paper_risk_usd must be > 0")
+
     if strat.get("long_rsi_min", 0) >= strat.get("long_rsi_max", 100):
         errors.append("strategy.long_rsi_min must be < long_rsi_max")
     if strat.get("short_rsi_min", 0) >= strat.get("short_rsi_max", 100):

@@ -266,6 +266,12 @@ function useLiveDeskData() {
   const [watchInput, setWatchInput] = useState("");
   const [statusMessage, setStatusMessage] = useState("Control center ready.");
   const [binance, setBinance] = useState(null);
+  const [runtimeSettings, setRuntimeSettings] = useState({
+    account: {},
+    execution: {},
+    strategy: {},
+    live_loop: {}
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -278,6 +284,7 @@ function useLiveDeskData() {
       startTransition(() => {
         setOptions(payload);
         setWatchlistSymbols(Array.isArray(payload.selected_symbols) ? payload.selected_symbols : []);
+        setRuntimeSettings(payload.runtime_settings || { account: {}, execution: {}, strategy: {}, live_loop: {} });
         setSelectedCoin("ALL");
       });
     }
@@ -443,6 +450,30 @@ function useLiveDeskData() {
     setStatusMessage(payload.message || `Saved ${watchlistSymbols.length} symbols to the runtime watchlist.`);
   }
 
+  function updateRuntimeSetting(section, key, value) {
+    setRuntimeSettings((current) => ({
+      ...current,
+      [section]: {
+        ...(current?.[section] || {}),
+        [key]: value
+      }
+    }));
+  }
+
+  async function saveRuntimeSettings() {
+    const response = await fetch("/api/config/runtime-settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(runtimeSettings)
+    });
+    const payload = await response.json();
+    if (!response.ok || !payload.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+    if (payload.runtime_settings) {
+      setRuntimeSettings(payload.runtime_settings);
+    }
+    setStatusMessage(payload.message || "Runtime settings saved.");
+  }
+
   function addWatchSymbol() {
     const symbol = String(watchInput || "").trim().toUpperCase();
     if (!symbol) return;
@@ -478,6 +509,9 @@ function useLiveDeskData() {
     setWatchInput,
     statusMessage,
     setStatusMessage,
+    runtimeSettings,
+    updateRuntimeSetting,
+    saveRuntimeSettings,
     savePrimaryCoin,
     saveWatchlist,
     addWatchSymbol,
@@ -667,6 +701,11 @@ function HomePage({ desk }) {
     { label: "Desk Status", value: desk.state?.status || "WAITING", hint: "Realtime backend state" },
     { label: "Open Trade", value: openTrade?.symbol || "None", hint: openTrade ? openTrade.side : "Scanning" },
     { label: "Possible Trades", value: String(desk.state?.possible_trades_live?.length ?? possibleTrades.length ?? 0), hint: "Current live setups" },
+    {
+      label: "USDT Net PnL",
+      value: `${Number(desk.analytics?.summary?.total_net_pnl_usdt || 0) >= 0 ? "+" : "-"}$${Math.abs(Number(desk.analytics?.summary?.total_net_pnl_usdt || 0)).toFixed(2)}`,
+      hint: "Closed trades after estimated fees/slippage"
+    },
     { label: "Win Rate", value: fmtPercent(desk.analytics?.win_rate ?? desk.state?.summary?.win_rate), hint: "Historical conversion" },
     { label: "Expectancy", value: `${fmtNumber(desk.analytics?.expectancy_r ?? desk.state?.summary?.expectancy_r, 3)}R`, hint: "Per closed trade" },
     { label: "Stored History", value: String(desk.history?.count ?? 0), hint: "Mongo-backed records" }
@@ -746,19 +785,19 @@ function HomePage({ desk }) {
       </motion.section>
 
       {desk.binance?.enabled && (
-        <motion.section className="overview-grid" {...pageMotion}>
-          <motion.article className="overview-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
+      <motion.section className="overview-grid" {...pageMotion}>
+        <motion.article className="overview-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
             <span>Binance Balance</span>
             <strong>${desk.binance.balance?.toFixed(2)}</strong>
             <small>{desk.binance.demo ? "Demo account" : "Live account"}</small>
-          </motion.article>
-          <motion.article className="overview-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
-            <span>Binance P&L</span>
+        </motion.article>
+        <motion.article className="overview-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
+            <span>Binance Total P&L</span>
             <strong style={{ color: desk.binance.total_pnl >= 0 ? "#22c55e" : "#ef4444" }}>
               {desk.binance.total_pnl >= 0 ? "+$" : "-$"}{Math.abs(desk.binance.total_pnl)?.toFixed(2)}
             </strong>
-            <small>Since $5,000 initial</small>
-          </motion.article>
+            <small>Total wallet value, not USDT-only trading PnL</small>
+        </motion.article>
           <motion.article className="overview-card" initial={{ opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
             <span>Unrealized P&L</span>
             <strong style={{ color: desk.binance.unrealized_pnl >= 0 ? "#22c55e" : "#ef4444" }}>
@@ -972,6 +1011,14 @@ function HistoryPage({ desk }) {
           <small>Total PnL: {totalPnlR >= 0 ? "+" : ""}{totalPnlR.toFixed(3)}R</small>
         </div>
         <div className="overview-card history-summary-card">
+          <span>Net USDT PnL</span>
+          <strong style={{ color: Number(desk.analytics?.summary?.total_net_pnl_usdt || 0) >= 0 ? "#22c55e" : "#ef4444" }}>
+            {Number(desk.analytics?.summary?.total_net_pnl_usdt || 0) >= 0 ? "+$" : "-$"}
+            {Math.abs(Number(desk.analytics?.summary?.total_net_pnl_usdt || 0)).toFixed(2)}
+          </strong>
+          <small>Closed trades after estimated fees/slippage</small>
+        </div>
+        <div className="overview-card history-summary-card">
           <span>Latest Close</span>
           <strong>{filteredHistory[0]?.symbol || "None"}</strong>
           <small>{filteredHistory[0] ? fmtTime(getTradeCloseMs(filteredHistory[0])) : "Waiting for a closed result"}</small>
@@ -1013,6 +1060,8 @@ function HistoryPage({ desk }) {
               <th>Binance</th>
               <th>PnL (R)</th>
               <th>PnL ($)</th>
+              <th>Fee Est. ($)</th>
+              <th>Net USDT ($)</th>
             </tr>
           </thead>
           <tbody>
@@ -1042,6 +1091,10 @@ function HistoryPage({ desk }) {
                   <td>{trade.binance_executed ? <span style={{ color: "#22c55e" }}>Yes</span> : <span style={{ color: "#64748b" }}>No</span>}</td>
                   <td style={{ color: pnlColor, fontWeight: 600 }}>{trade.pnl_r != null ? (trade.pnl_r >= 0 ? "+" : "") + trade.pnl_r.toFixed(3) : "—"}</td>
                   <td style={{ color: pnlColor }}>{trade.pnl_usd != null ? (trade.pnl_usd >= 0 ? "+$" : "-$") + Math.abs(trade.pnl_usd).toFixed(3) : "—"}</td>
+                  <td>{trade.est_cost_usd != null ? `$${Number(trade.est_cost_usd).toFixed(3)}` : "—"}</td>
+                  <td style={{ color: Number(trade.net_pnl_usdt || 0) >= 0 ? "#22c55e" : "#ef4444" }}>
+                    {trade.net_pnl_usdt != null ? (Number(trade.net_pnl_usdt) >= 0 ? "+$" : "-$") + Math.abs(Number(trade.net_pnl_usdt)).toFixed(3) : "—"}
+                  </td>
                 </tr>
               );
             })}
@@ -1141,6 +1194,20 @@ function FeaturesPage() {
 }
 
 function ControlsPage({ desk }) {
+  const [watchlistPage, setWatchlistPage] = useState(0);
+  const WATCHLIST_PAGE_SIZE = 12;
+  const totalWatchPages = Math.max(1, Math.ceil(desk.watchlistSymbols.length / WATCHLIST_PAGE_SIZE));
+  const pagedWatchlist = desk.watchlistSymbols.slice(
+    watchlistPage * WATCHLIST_PAGE_SIZE,
+    watchlistPage * WATCHLIST_PAGE_SIZE + WATCHLIST_PAGE_SIZE
+  );
+
+  useEffect(() => {
+    if (watchlistPage >= totalWatchPages) {
+      setWatchlistPage(Math.max(0, totalWatchPages - 1));
+    }
+  }, [watchlistPage, totalWatchPages]);
+
   async function enableTradeAlerts() {
     playAlertSound();
     if (typeof window !== "undefined" && "Notification" in window) {
@@ -1241,8 +1308,31 @@ function ControlsPage({ desk }) {
               Save Watchlist
             </button>
           </div>
+          <div className="pagination-bar">
+            <span>
+              Page {totalWatchPages ? watchlistPage + 1 : 1} / {totalWatchPages}
+            </span>
+            <div className="pagination-actions">
+              <button
+                className="surface-button ghost pagination-button"
+                type="button"
+                onClick={() => setWatchlistPage((page) => Math.max(0, page - 1))}
+                disabled={watchlistPage === 0}
+              >
+                Previous
+              </button>
+              <button
+                className="surface-button ghost pagination-button"
+                type="button"
+                onClick={() => setWatchlistPage((page) => Math.min(totalWatchPages - 1, page + 1))}
+                disabled={watchlistPage >= totalWatchPages - 1}
+              >
+                Next
+              </button>
+            </div>
+          </div>
           <div className="watchlist-grid">
-            {desk.watchlistSymbols.map((symbol) => (
+            {pagedWatchlist.map((symbol) => (
               <div key={symbol} className="watch-chip">
                 <span>{symbol}</span>
                 <button
@@ -1258,8 +1348,193 @@ function ControlsPage({ desk }) {
           </div>
         </article>
       </div>
+      <article className="feature-panel control-panel config-panel">
+        <div className="panel-topline">
+          <span>Runtime Config</span>
+          <span>Live controls</span>
+        </div>
+        <div className="control-copy">
+          <h3>Trading Parameters</h3>
+          <p>Update wallet risk, execution cost, and key strategy thresholds from this page instead of editing config files manually.</p>
+        </div>
+        <div className="config-sections">
+          <div className="config-section">
+            <div className="control-subhead">
+              <strong>Account</strong>
+              <span>Wallet-based risk sizing</span>
+            </div>
+            <div className="config-grid">
+              <ConfigField
+                label="Starting Balance USD"
+                value={desk.runtimeSettings?.account?.starting_balance_usd ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("account", "starting_balance_usd", value)}
+              />
+              <ConfigField
+                label="Risk Per Trade %"
+                value={desk.runtimeSettings?.account?.risk_per_trade_pct ?? ""}
+                step="0.001"
+                hint="Use 0.02 for 2%"
+                onChange={(value) => desk.updateRuntimeSetting("account", "risk_per_trade_pct", value)}
+              />
+              <ConfigField
+                label="Paper Risk USD"
+                value={desk.runtimeSettings?.account?.paper_risk_usd ?? ""}
+                step="0.01"
+                hint="Optional override"
+                onChange={(value) => desk.updateRuntimeSetting("account", "paper_risk_usd", value)}
+              />
+            </div>
+          </div>
+
+          <div className="config-section">
+            <div className="control-subhead">
+              <strong>Execution</strong>
+              <span>Fee and slippage model</span>
+            </div>
+            <div className="config-grid">
+              <ConfigField
+                label="Fee Bps Per Side"
+                value={desk.runtimeSettings?.execution?.fee_bps_per_side ?? ""}
+                step="0.1"
+                onChange={(value) => desk.updateRuntimeSetting("execution", "fee_bps_per_side", value)}
+              />
+              <ConfigField
+                label="Slippage Bps Per Side"
+                value={desk.runtimeSettings?.execution?.slippage_bps_per_side ?? ""}
+                step="0.1"
+                onChange={(value) => desk.updateRuntimeSetting("execution", "slippage_bps_per_side", value)}
+              />
+              <ConfigField
+                label="Max Open Trades"
+                value={desk.runtimeSettings?.live_loop?.max_open_trades ?? ""}
+                step="1"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "max_open_trades", value)}
+              />
+            </div>
+          </div>
+
+          <div className="config-section">
+            <div className="control-subhead">
+              <strong>Strategy</strong>
+              <span>Signal construction</span>
+            </div>
+            <div className="config-grid">
+              <ConfigField
+                label="ATR Multiplier"
+                value={desk.runtimeSettings?.strategy?.atr_multiplier ?? ""}
+                step="0.1"
+                onChange={(value) => desk.updateRuntimeSetting("strategy", "atr_multiplier", value)}
+              />
+              <ConfigField
+                label="Risk Reward"
+                value={desk.runtimeSettings?.strategy?.risk_reward ?? ""}
+                step="0.1"
+                onChange={(value) => desk.updateRuntimeSetting("strategy", "risk_reward", value)}
+              />
+              <ConfigField
+                label="Min Confidence"
+                value={desk.runtimeSettings?.strategy?.min_confidence ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("strategy", "min_confidence", value)}
+              />
+            </div>
+          </div>
+
+          <div className="config-section">
+            <div className="control-subhead">
+              <strong>Live Filters</strong>
+              <span>Execution gates and exits</span>
+            </div>
+            <div className="config-grid">
+              <ConfigField
+                label="Candidate Confidence"
+                value={desk.runtimeSettings?.live_loop?.min_candidate_confidence ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "min_candidate_confidence", value)}
+              />
+              <ConfigField
+                label="Candidate Expectancy R"
+                value={desk.runtimeSettings?.live_loop?.min_candidate_expectancy_r ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "min_candidate_expectancy_r", value)}
+              />
+              <ConfigField
+                label="Execute Confidence"
+                value={desk.runtimeSettings?.live_loop?.execute_min_confidence ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "execute_min_confidence", value)}
+              />
+              <ConfigField
+                label="Execute Expectancy R"
+                value={desk.runtimeSettings?.live_loop?.execute_min_expectancy_r ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "execute_min_expectancy_r", value)}
+              />
+              <ConfigField
+                label="Execute Score"
+                value={desk.runtimeSettings?.live_loop?.execute_min_score ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "execute_min_score", value)}
+              />
+              <ConfigField
+                label="Execute Win Probability"
+                value={desk.runtimeSettings?.live_loop?.execute_min_win_probability ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "execute_min_win_probability", value)}
+              />
+              <ConfigField
+                label="Max Wait Candles"
+                value={desk.runtimeSettings?.live_loop?.max_wait_candles ?? ""}
+                step="1"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "max_wait_candles", value)}
+              />
+              <ConfigField
+                label="Trail Trigger R"
+                value={desk.runtimeSettings?.live_loop?.trail_trigger_r ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "trail_trigger_r", value)}
+              />
+              <ConfigField
+                label="Break-even Trigger R"
+                value={desk.runtimeSettings?.live_loop?.break_even_trigger_r ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "break_even_trigger_r", value)}
+              />
+              <ConfigField
+                label="Max Adverse Cut R"
+                value={desk.runtimeSettings?.live_loop?.max_adverse_r_cut ?? ""}
+                step="0.01"
+                onChange={(value) => desk.updateRuntimeSetting("live_loop", "max_adverse_r_cut", value)}
+              />
+            </div>
+          </div>
+        </div>
+        <div className="control-actions">
+          <button className="surface-button" type="button" onClick={() => desk.saveRuntimeSettings().catch((error) => desk.setStatusMessage(error.message))}>
+            Save Runtime Settings
+          </button>
+        </div>
+      </article>
       <div className="status-banner">{desk.statusMessage}</div>
     </PageWrap>
+  );
+}
+
+function ConfigField({ label, value, onChange, step = "0.01", hint = "" }) {
+  return (
+    <label className="config-field">
+      <span>{label}</span>
+      <input
+        className="surface-input"
+        type="number"
+        inputMode="decimal"
+        step={step}
+        value={value ?? ""}
+        onChange={(event) => onChange(event.target.value)}
+      />
+      {hint ? <small>{hint}</small> : null}
+    </label>
   );
 }
 

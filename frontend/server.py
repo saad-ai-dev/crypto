@@ -190,6 +190,42 @@ class MongoStore:
         except PyMongoError as exc:
             self.last_error = str(exc)
 
+    def persist_trade_record(self, record: Dict[str, Any], source: str) -> None:
+        if not self.available or not isinstance(record, dict) or not record:
+            return
+        trade_key = self._trade_key({"time": record.get("event_time")}, record)
+        doc = {
+            "trade_key": trade_key,
+            "event_hash": None,
+            "source": source,
+            "event_time": record.get("event_time"),
+            "cycle": record.get("cycle"),
+            "symbol": record.get("symbol"),
+            "timeframe": record.get("timeframe"),
+            "side": record.get("side"),
+            "entry": record.get("entry"),
+            "take_profit": record.get("take_profit"),
+            "stop_loss": record.get("stop_loss"),
+            "exit_price": record.get("exit_price"),
+            "result": record.get("result"),
+            "opened_at_ms": record.get("opened_at_ms"),
+            "closed_at_ms": record.get("closed_at_ms"),
+            "pnl_r": record.get("pnl_r"),
+            "pnl_usd": record.get("pnl_usd"),
+            "reason": record.get("reason"),
+            "est_cost_usd": record.get("est_cost_usd"),
+            "net_pnl_usdt": record.get("net_pnl_usdt"),
+            "binance_executed": record.get("binance_executed"),
+            "synthetic": record.get("synthetic", False),
+            "history_source": record.get("history_source"),
+            "ingested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            with self._lock:
+                self.trades.update_one({"trade_key": trade_key}, {"$setOnInsert": doc}, upsert=True)
+        except PyMongoError as exc:
+            self.last_error = str(exc)
+
     def persist_runtime_control(self, payload: Dict[str, Any]) -> None:
         if not self.available:
             return
@@ -656,12 +692,48 @@ class TradeHistoryCache:
         self._file_identity: Optional[tuple[int, int]] = None
         self._items: list[Dict[str, Any]] = []
         self._keys: set[str] = set()
+        self._open_trade_contexts: Dict[str, Dict[str, Any]] = {}
+        self._binance_open_contexts: Dict[str, Dict[str, Any]] = {}
+        self._config_file = (self.history_file.parent.parent / "config.json").resolve()
+
+    def _execution_cost_bps_total(self) -> float:
+        try:
+            payload = json.loads(self._config_file.read_text(encoding="utf-8"))
+            execution = payload.get("execution", {})
+            fee_bps = float(execution.get("fee_bps_per_side", 0.0))
+            slip_bps = float(execution.get("slippage_bps_per_side", 0.0))
+            return (fee_bps + slip_bps) * 2.0
+        except Exception:
+            return 0.0
+
+    def _estimated_cost_usd(self, trade: Dict[str, Any]) -> float:
+        entry = float(trade.get("entry") or 0.0)
+        exit_price = float(trade.get("exit_price") or 0.0)
+        stop_loss = float(trade.get("stop_loss") or 0.0)
+        pnl_usd = float(trade.get("pnl_usd") or 0.0)
+        pnl_r = float(trade.get("pnl_r") or 0.0)
+        if entry <= 0 or stop_loss <= 0 or pnl_r == 0:
+            return 0.0
+
+        risk_per_unit = abs(entry - stop_loss)
+        if risk_per_unit <= 0:
+            return 0.0
+
+        risk_usd = abs(pnl_usd / pnl_r)
+        if risk_usd <= 0:
+            return 0.0
+
+        qty = risk_usd / risk_per_unit
+        avg_notional = ((entry + exit_price) / 2.0) * qty if exit_price > 0 else entry * qty
+        return avg_notional * (self._execution_cost_bps_total() / 10000.0)
 
     def _reset(self) -> None:
         self._position = 0
         self._file_identity = None
         self._items = []
         self._keys = set()
+        self._open_trade_contexts = {}
+        self._binance_open_contexts = {}
 
     @staticmethod
     def _line(raw: str) -> str:
@@ -679,7 +751,23 @@ class TradeHistoryCache:
         return f"{symbol}|{timeframe}|{side}|{result}|{opened}|{closed}|{event_time}"
 
     @staticmethod
-    def _normalize_record(event: Dict[str, Any], trade: Dict[str, Any]) -> Dict[str, Any]:
+    def _symbol_key(symbol: Any, side: Any) -> str:
+        return f"{str(symbol or '').strip().upper()}|{str(side or '').strip().upper()}"
+
+    @staticmethod
+    def _event_ms(event_time: Optional[str]) -> Optional[int]:
+        if not event_time:
+            return None
+        try:
+            clean = str(event_time).strip().replace("Z", "+00:00")
+            return int(datetime.fromisoformat(clean).timestamp() * 1000)
+        except ValueError:
+            return None
+
+    def _normalize_record(self, event: Dict[str, Any], trade: Dict[str, Any]) -> Dict[str, Any]:
+        pnl_usd = float(trade.get("pnl_usd") or 0.0)
+        est_cost_usd = self._estimated_cost_usd(trade)
+        net_pnl_usdt = pnl_usd - est_cost_usd
         return {
             "event_time": event.get("time"),
             "cycle": event.get("cycle"),
@@ -694,20 +782,182 @@ class TradeHistoryCache:
             "opened_at_ms": trade.get("opened_at_ms"),
             "closed_at_ms": trade.get("closed_at_ms"),
             "pnl_r": trade.get("pnl_r"),
-            "pnl_usd": trade.get("pnl_usd"),
+            "pnl_usd": pnl_usd,
+            "est_cost_usd": round(est_cost_usd, 6),
+            "net_pnl_usdt": round(net_pnl_usdt, 6),
             "reason": trade.get("reason"),
             "binance_executed": event.get("binance_executed", False),
         }
 
-    def _append(self, event: Dict[str, Any], trade: Dict[str, Any]) -> None:
-        key = self._trade_key(event, trade)
+    def _append_record(self, key: str, record: Dict[str, Any]) -> None:
         if key in self._keys:
             return
         self._keys.add(key)
-        self._items.append(self._normalize_record(event, trade))
+        self._items.append(record)
         if len(self._items) > self.max_items:
             self._items = self._items[-self.max_items :]
             self._keys = {self._trade_key({"time": row.get("event_time")}, row) for row in self._items}
+
+    def _drop_matching_synthetic(self, record: Dict[str, Any]) -> None:
+        target_symbol = str(record.get("symbol") or "").upper()
+        target_side = str(record.get("side") or "").upper()
+        target_opened = record.get("opened_at_ms")
+        target_closed = record.get("closed_at_ms")
+
+        match_index: Optional[int] = None
+        for idx in range(len(self._items) - 1, -1, -1):
+            row = self._items[idx]
+            if not row.get("synthetic"):
+                continue
+            if str(row.get("symbol") or "").upper() != target_symbol:
+                continue
+            if str(row.get("side") or "").upper() != target_side:
+                continue
+
+            row_opened = row.get("opened_at_ms")
+            row_closed = row.get("closed_at_ms")
+            if (
+                isinstance(target_opened, int)
+                and isinstance(row_opened, int)
+                and target_opened == row_opened
+            ):
+                match_index = idx
+                break
+            if (
+                isinstance(target_closed, int)
+                and isinstance(row_closed, int)
+                and abs(target_closed - row_closed) <= 5 * 60 * 1000
+            ):
+                match_index = idx
+                break
+
+        if match_index is None:
+            return
+
+        self._items.pop(match_index)
+        self._keys = {self._trade_key({"time": row.get("event_time")}, row) for row in self._items}
+
+    def _append(self, event: Dict[str, Any], trade: Dict[str, Any]) -> None:
+        record = self._normalize_record(event, trade)
+        self._drop_matching_synthetic(record)
+        key = self._trade_key(event, trade)
+        self._append_record(key, record)
+
+    def _register_open_trade(self, event: Dict[str, Any]) -> None:
+        key = self._symbol_key(event.get("symbol"), event.get("side"))
+        self._open_trade_contexts[key] = {
+            "symbol": event.get("symbol"),
+            "timeframe": event.get("timeframe"),
+            "side": event.get("side"),
+            "entry": event.get("entry"),
+            "take_profit": event.get("take_profit"),
+            "stop_loss": event.get("stop_loss"),
+            "opened_at_ms": self._event_ms(event.get("time")),
+            "event_time": event.get("time"),
+        }
+
+    def _register_binance_open(self, event: Dict[str, Any]) -> None:
+        key = self._symbol_key(event.get("symbol"), event.get("side"))
+        result = event.get("result") or {}
+        self._binance_open_contexts[key] = {
+            "event_time": event.get("time"),
+            "opened_at_ms": self._event_ms(event.get("time")),
+            "entry_price": result.get("entry_price"),
+            "quantity": result.get("quantity"),
+            "notional": result.get("notional"),
+            "executed": result.get("executed", False),
+            "status": result.get("status"),
+        }
+
+    def _append_synthetic_binance_close(self, event: Dict[str, Any]) -> None:
+        action = str(event.get("action") or "").strip().upper()
+        if action not in {"CLOSE", "RETRY_CLOSE", "ORPHAN_CLOSE"}:
+            return
+
+        key = self._symbol_key(event.get("symbol"), event.get("side"))
+        open_trade = self._open_trade_contexts.get(key, {})
+        binance_open = self._binance_open_contexts.get(key, {})
+        result = event.get("result") or {}
+
+        pnl_usd = event.get("pnl")
+        if pnl_usd is None:
+            pnl_usd = result.get("unrealized_pnl")
+        try:
+            pnl_usd = float(pnl_usd)
+        except (TypeError, ValueError):
+            return
+
+        side = str(event.get("side") or open_trade.get("side") or "").upper()
+        entry = (
+            result.get("entry_price")
+            or binance_open.get("entry_price")
+            or open_trade.get("entry")
+        )
+        quantity = result.get("quantity") or binance_open.get("quantity")
+        stop_loss = open_trade.get("stop_loss")
+        take_profit = open_trade.get("take_profit")
+        timeframe = open_trade.get("timeframe")
+        opened_at_ms = open_trade.get("opened_at_ms") or binance_open.get("opened_at_ms")
+        closed_at_ms = self._event_ms(event.get("time"))
+
+        try:
+            entry_value = float(entry)
+        except (TypeError, ValueError):
+            entry_value = 0.0
+        try:
+            qty_value = float(quantity)
+        except (TypeError, ValueError):
+            qty_value = 0.0
+        try:
+            stop_value = float(stop_loss)
+        except (TypeError, ValueError):
+            stop_value = 0.0
+
+        exit_price: Optional[float] = None
+        if entry_value > 0 and qty_value > 0:
+            price_delta = pnl_usd / qty_value
+            exit_price = entry_value + price_delta if side == "LONG" else entry_value - price_delta
+
+        pnl_r: Optional[float] = None
+        if entry_value > 0 and stop_value > 0 and qty_value > 0:
+            risk_usd = abs(entry_value - stop_value) * qty_value
+            if risk_usd > 0:
+                pnl_r = pnl_usd / risk_usd
+
+        if pnl_usd > 0:
+            trade_result = "WIN"
+        elif pnl_usd < 0:
+            trade_result = "LOSS"
+        else:
+            trade_result = "BREAKEVEN"
+
+        trade = {
+            "symbol": event.get("symbol") or open_trade.get("symbol"),
+            "timeframe": timeframe,
+            "side": side,
+            "entry": entry_value if entry_value > 0 else entry,
+            "take_profit": take_profit,
+            "stop_loss": stop_loss,
+            "exit_price": exit_price,
+            "result": trade_result,
+            "opened_at_ms": opened_at_ms,
+            "closed_at_ms": closed_at_ms,
+            "pnl_r": pnl_r,
+            "pnl_usd": pnl_usd,
+            "reason": f"BINANCE_{action}",
+        }
+        synthetic_event = {
+            "time": event.get("time"),
+            "cycle": event.get("cycle"),
+            "binance_executed": True,
+        }
+        record = self._normalize_record(synthetic_event, trade)
+        record["synthetic"] = True
+        record["history_source"] = "BINANCE_RECONCILED"
+        record_key = self._trade_key(synthetic_event, trade)
+        self._append_record(record_key, record)
+        if self.mongo_store:
+            self.mongo_store.persist_trade_record(record, source=str(self.history_file))
 
     def refresh(self, limit: int = 200) -> Dict[str, Any]:
         with self._lock:
@@ -742,7 +992,18 @@ class TradeHistoryCache:
                         continue
                     if self.mongo_store:
                         self.mongo_store.persist_event(event, source=str(self.history_file))
-                    if event.get("type") != "TRADE_RESULT":
+                    event_type = event.get("type")
+                    if event_type == "OPEN_TRADE":
+                        self._register_open_trade(event)
+                        continue
+                    if event_type == "BINANCE_ORDER":
+                        action = str(event.get("action") or "").strip().upper()
+                        if action == "OPEN":
+                            self._register_binance_open(event)
+                        else:
+                            self._append_synthetic_binance_close(event)
+                        continue
+                    if event_type != "TRADE_RESULT":
                         continue
                     trade = event.get("trade") or {}
                     if not isinstance(trade, dict) or not trade:
@@ -1024,6 +1285,7 @@ class AnalyticsEngine:
 
         # Equity curve
         equity = 0.0
+        net_equity_usdt = 0.0
         equity_curve = []
         pnl_values = []
         wins = 0
@@ -1041,7 +1303,10 @@ class AnalyticsEngine:
         for item in items:
             pnl_r = float(item.get("pnl_r") or 0)
             pnl_usd = float(item.get("pnl_usd") or 0)
+            net_pnl_usdt = float(item.get("net_pnl_usdt") or pnl_usd)
+            est_cost_usd = float(item.get("est_cost_usd") or 0)
             equity += pnl_usd
+            net_equity_usdt += net_pnl_usdt
             pnl_values.append(pnl_r)
             result = str(item.get("result") or "").upper()
 
@@ -1056,7 +1321,16 @@ class AnalyticsEngine:
                     pass
 
             ts = item.get("closed_at_ms") or item.get("event_time") or ""
-            equity_curve.append({"time": ts, "equity": round(equity, 4), "pnl_usd": round(pnl_usd, 4)})
+            equity_curve.append(
+                {
+                    "time": ts,
+                    "equity": round(equity, 4),
+                    "net_equity_usdt": round(net_equity_usdt, 4),
+                    "pnl_usd": round(pnl_usd, 4),
+                    "net_pnl_usdt": round(net_pnl_usdt, 4),
+                    "est_cost_usd": round(est_cost_usd, 4),
+                }
+            )
 
             if result == "WIN":
                 wins += 1
@@ -1088,27 +1362,31 @@ class AnalyticsEngine:
         peak = 0.0
         max_dd = 0.0
         running = 0.0
+        running_net = 0.0
         dd_curve = []
         for item in items:
             running += float(item.get("pnl_usd") or 0)
+            running_net += float(item.get("net_pnl_usdt") or item.get("pnl_usd") or 0)
             peak = max(peak, running)
             dd = peak - running
             max_dd = max(max_dd, dd)
             ts = item.get("closed_at_ms") or item.get("event_time") or ""
-            dd_curve.append({"time": ts, "drawdown": round(dd, 4)})
+            dd_curve.append({"time": ts, "drawdown": round(dd, 4), "net_usdt": round(running_net, 4)})
 
         # Symbol breakdown
         sym_stats: Dict[str, Dict] = {}
         for item in items:
             sym = str(item.get("symbol") or "UNKNOWN")
             if sym not in sym_stats:
-                sym_stats[sym] = {"wins": 0, "losses": 0, "pnl_usd": 0.0, "pnl_r": 0.0}
+                sym_stats[sym] = {"wins": 0, "losses": 0, "pnl_usd": 0.0, "net_pnl_usdt": 0.0, "cost_usd": 0.0, "pnl_r": 0.0}
             result = str(item.get("result") or "").upper()
             if result == "WIN":
                 sym_stats[sym]["wins"] += 1
             elif result == "LOSS":
                 sym_stats[sym]["losses"] += 1
             sym_stats[sym]["pnl_usd"] += float(item.get("pnl_usd") or 0)
+            sym_stats[sym]["net_pnl_usdt"] += float(item.get("net_pnl_usdt") or item.get("pnl_usd") or 0)
+            sym_stats[sym]["cost_usd"] += float(item.get("est_cost_usd") or 0)
             sym_stats[sym]["pnl_r"] += float(item.get("pnl_r") or 0)
 
         symbol_breakdown = []
@@ -1121,6 +1399,8 @@ class AnalyticsEngine:
                 "losses": s["losses"],
                 "win_rate": round(s["wins"] / sym_total, 4) if sym_total else 0,
                 "pnl_usd": round(s["pnl_usd"], 4),
+                "net_pnl_usdt": round(s["net_pnl_usdt"], 4),
+                "cost_usd": round(s["cost_usd"], 4),
                 "pnl_r": round(s["pnl_r"], 4),
             })
 
@@ -1172,6 +1452,9 @@ class AnalyticsEngine:
                 "avg_loss_r": round(avg_loss_r, 4),
                 "expectancy_r": round(expectancy_r, 4),
                 "total_pnl_usd": round(equity, 4),
+                "total_net_pnl_usdt": round(net_equity_usdt, 4),
+                "total_est_cost_usd": round(sum(float(item.get("est_cost_usd") or 0) for item in items), 4),
+                "avg_net_pnl_usdt": round(net_equity_usdt / total, 4) if total else 0.0,
             },
             "equity_curve": equity_curve,
             "symbol_breakdown": symbol_breakdown,
@@ -1190,6 +1473,25 @@ class AnalyticsEngine:
 
 
 class ConfigStore:
+    EDITABLE_FIELDS: Dict[str, tuple[str, ...]] = {
+        "account": ("starting_balance_usd", "risk_per_trade_pct", "paper_risk_usd"),
+        "execution": ("fee_bps_per_side", "slippage_bps_per_side"),
+        "strategy": ("atr_multiplier", "risk_reward", "min_confidence"),
+        "live_loop": (
+            "max_open_trades",
+            "min_candidate_confidence",
+            "min_candidate_expectancy_r",
+            "execute_min_confidence",
+            "execute_min_expectancy_r",
+            "execute_min_score",
+            "execute_min_win_probability",
+            "max_wait_candles",
+            "trail_trigger_r",
+            "break_even_trigger_r",
+            "max_adverse_r_cut",
+        ),
+    }
+
     def __init__(
         self,
         config_file: Path,
@@ -1244,6 +1546,78 @@ class ConfigStore:
                 "selected_symbol": selected_symbol,
                 "live_symbols": live_symbols,
                 "selected_symbols": live_symbols,
+                "runtime_settings": self._extract_runtime_settings(config),
+            }
+
+    def _extract_runtime_settings(self, config: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        settings: Dict[str, Dict[str, Any]] = {}
+        for section, keys in self.EDITABLE_FIELDS.items():
+            source = config.get(section, {})
+            settings[section] = {key: source.get(key) for key in keys}
+        return settings
+
+    @staticmethod
+    def _coerce_number(raw: Any, allow_null: bool = False) -> Optional[float]:
+        if raw is None or raw == "":
+            if allow_null:
+                return None
+            raise ValueError("value is required")
+        value = float(raw)
+        if not value and value != 0:
+            raise ValueError("invalid numeric value")
+        return value
+
+    def update_runtime_settings(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        with self._lock:
+            config = self._load()
+
+            account = config.setdefault("account", {})
+            execution = config.setdefault("execution", {})
+            strategy = config.setdefault("strategy", {})
+            live_loop = config.setdefault("live_loop", {})
+
+            account_payload = payload.get("account", {}) or {}
+            execution_payload = payload.get("execution", {}) or {}
+            strategy_payload = payload.get("strategy", {}) or {}
+            live_loop_payload = payload.get("live_loop", {}) or {}
+
+            if "starting_balance_usd" in account_payload:
+                account["starting_balance_usd"] = self._coerce_number(account_payload.get("starting_balance_usd"))
+            if "risk_per_trade_pct" in account_payload:
+                risk_pct = self._coerce_number(account_payload.get("risk_per_trade_pct"))
+                if risk_pct is None or risk_pct <= 0:
+                    raise ValueError("account.risk_per_trade_pct must be > 0")
+                account["risk_per_trade_pct"] = risk_pct
+            if "paper_risk_usd" in account_payload:
+                paper_risk = self._coerce_number(account_payload.get("paper_risk_usd"), allow_null=True)
+                if paper_risk is not None and paper_risk <= 0:
+                    raise ValueError("account.paper_risk_usd must be > 0")
+                if paper_risk is None:
+                    account.pop("paper_risk_usd", None)
+                else:
+                    account["paper_risk_usd"] = paper_risk
+
+            for key in ("fee_bps_per_side", "slippage_bps_per_side"):
+                if key in execution_payload:
+                    execution[key] = self._coerce_number(execution_payload.get(key))
+
+            for key in ("atr_multiplier", "risk_reward", "min_confidence"):
+                if key in strategy_payload:
+                    strategy[key] = self._coerce_number(strategy_payload.get(key))
+
+            int_live_keys = {"max_open_trades", "max_wait_candles"}
+            for key in self.EDITABLE_FIELDS["live_loop"]:
+                if key not in live_loop_payload:
+                    continue
+                value = self._coerce_number(live_loop_payload.get(key))
+                live_loop[key] = int(value) if key in int_live_keys and value is not None else value
+
+            self._save(config)
+
+            return {
+                "ok": True,
+                "message": "Runtime settings saved to config. Restart live trading to apply executor sizing changes immediately.",
+                "runtime_settings": self._extract_runtime_settings(config),
             }
 
     def set_symbol(self, symbol: str) -> Dict[str, Any]:
@@ -1424,13 +1798,15 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlparse(self.path).path
-        if path not in {"/api/config/symbol", "/api/config/symbols"}:
+        if path not in {"/api/config/symbol", "/api/config/symbols", "/api/config/runtime-settings"}:
             self._write_json({"ok": False, "error": "Not found"}, status=HTTPStatus.NOT_FOUND)
             return
 
         try:
             payload = self._read_json_body()
-            if path == "/api/config/symbols":
+            if path == "/api/config/runtime-settings":
+                result = self.config_store.update_runtime_settings(payload)
+            elif path == "/api/config/symbols":
                 symbols = payload.get("symbols")
                 if not isinstance(symbols, list):
                     raise ValueError("symbols must be a list")

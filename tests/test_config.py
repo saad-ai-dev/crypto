@@ -65,6 +65,12 @@ class ConfigValidationTests(unittest.TestCase):
         errors = validate_config(cfg)
         self.assertTrue(any("relax_min_execute_expectancy_r" in e for e in errors))
 
+    def test_non_positive_paper_risk_usd_detected(self) -> None:
+        cfg = _valid_config()
+        cfg["account"]["paper_risk_usd"] = 0.0
+        errors = validate_config(cfg)
+        self.assertTrue(any("paper_risk_usd" in e for e in errors))
+
 
 if __name__ == "__main__":
     unittest.main()

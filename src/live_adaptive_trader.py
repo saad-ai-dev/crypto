@@ -30,6 +30,25 @@ class CandidateSignal:
     score: float
 
 
+@dataclass
+class ManagedTrade:
+    signal: Signal
+    engine: TradeEngine
+    start_time: float
+    timeframe_minutes: int
+    max_wait_seconds: int
+    last_seen_close_ms: int
+    best_r: float
+    original_risk: float
+    bars_seen: int
+    consecutive_adverse_bars: int
+    moved_to_break_even: bool
+    trailing_stop_active: bool
+    consecutive_fetch_errors: int
+    last_known_candles: Optional[List]
+    binance_opened: bool
+
+
 class LiveAdaptivePaperTrader:
     def __init__(self, config: Dict):
         self.config = config
@@ -48,7 +67,15 @@ class LiveAdaptivePaperTrader:
         self.base_strategy = StrategyEngine.from_dict(copy.deepcopy(config["strategy"]))
 
         acct = config["account"]
-        self.risk_usd = float(acct["starting_balance_usd"]) * float(acct["risk_per_trade_pct"])
+        self.starting_balance_usd = float(acct["starting_balance_usd"])
+        self.risk_per_trade_pct = float(acct["risk_per_trade_pct"])
+        self.paper_risk_usd = acct.get("paper_risk_usd")
+        self.risk_usd = (
+            float(self.paper_risk_usd)
+            if self.paper_risk_usd is not None
+            else self.starting_balance_usd * self.risk_per_trade_pct
+        )
+        self.risk_sizing_mode = "paper_risk_usd" if self.paper_risk_usd is not None else "balance_pct"
 
         execution_cfg = config.get("execution", {})
         self.cost_model = MLWalkForwardOptimizer(
@@ -93,6 +120,7 @@ class LiveAdaptivePaperTrader:
         self.target_win_rate = float(live_cfg.get("target_win_rate", 0.75))
         self.min_trades_for_success = int(live_cfg.get("min_trades_for_success", 20))
         self.max_cycles = int(live_cfg.get("max_cycles", 1200))
+        self.max_open_trades = int(live_cfg.get("max_open_trades", 1))
         self.enable_sound = bool(config.get("scanner", {}).get("enable_sound", True))
         self.enable_break_even = bool(live_cfg.get("enable_break_even", True))
         self.break_even_trigger_r = float(live_cfg.get("break_even_trigger_r", 0.5))
@@ -131,6 +159,8 @@ class LiveAdaptivePaperTrader:
         # Batch market data caches (refreshed each cycle via batch endpoints)
         self._premium_cache: Dict[str, "MarketContext"] = {}
         self._ticker_cache: Dict[str, float] = {}
+        self.invalid_symbol_failures: Dict[str, int] = defaultdict(int)
+        self.invalid_symbol_failure_threshold = int(live_cfg.get("invalid_symbol_failure_threshold", 2))
 
         cfg_path = config.get("_config_path")
         root_dir = Path(cfg_path).resolve().parent if cfg_path else Path.cwd()
@@ -150,6 +180,8 @@ class LiveAdaptivePaperTrader:
         self.global_consecutive_losses = 0
         self.global_pause_cycles_left = 0
         self.no_trade_filter_block_streak = 0
+        self.filter_rejections: Dict[str, int] = defaultdict(int)
+        self.open_trades: Dict[str, ManagedTrade] = {}
 
     @staticmethod
     def _normalize_symbols(symbols: List[str]) -> List[str]:
@@ -223,6 +255,9 @@ class LiveAdaptivePaperTrader:
 
     def _active_symbols(self) -> List[str]:
         return [s for s in self.symbols if int(self.symbol_cooldowns.get(s, 0)) <= 0]
+
+    def _open_trade_symbols(self) -> set[str]:
+        return {managed.signal.symbol for managed in self.open_trades.values()}
 
     def _decrement_cooldowns(self) -> None:
         changed: List[Dict[str, int]] = []
@@ -393,6 +428,44 @@ class LiveAdaptivePaperTrader:
             self._ticker_cache = self.client.fetch_all_ticker_prices()
         except Exception as exc:
             print(json.dumps({"type": "BATCH_TICKER_ERROR", "time": self._now_iso(), "error": str(exc)}))
+
+        self._reconcile_symbol_universe()
+
+    def _reconcile_symbol_universe(self) -> None:
+        known_symbols = set(self._premium_cache) | set(self._ticker_cache)
+        if not known_symbols:
+            return
+
+        removed: List[Dict[str, int]] = []
+        open_trade_symbols = self._open_trade_symbols()
+        for symbol in list(self.symbols):
+            if symbol in known_symbols:
+                self.invalid_symbol_failures[symbol] = 0
+                continue
+
+            self.invalid_symbol_failures[symbol] = int(self.invalid_symbol_failures.get(symbol, 0)) + 1
+            if self.invalid_symbol_failures[symbol] < self.invalid_symbol_failure_threshold:
+                continue
+            if symbol in open_trade_symbols:
+                continue
+
+            self.symbols.remove(symbol)
+            self.symbol_confidence.pop(symbol, None)
+            self.symbol_cooldowns.pop(symbol, None)
+            self.symbol_consecutive_losses.pop(symbol, None)
+            removed.append({"symbol": symbol, "failures": self.invalid_symbol_failures[symbol]})
+
+        if removed:
+            print(
+                json.dumps(
+                    {
+                        "type": "SYMBOLS_FILTERED",
+                        "time": self._now_iso(),
+                        "removed": removed,
+                        "remaining_symbols": len(self.symbols),
+                    }
+                )
+            )
 
     def _get_klines_window(self) -> List[str]:
         """Return the next window of symbols to fetch klines for (rotating)."""
@@ -977,6 +1050,11 @@ class LiveAdaptivePaperTrader:
             "win_rate": round(win_rate, 4),
             "expectancy_r": round(expectancy_r, 6),
             "expectancy_usd_per_trade": round(expectancy_r * self.risk_usd, 6),
+            "risk_usd": round(self.risk_usd, 6),
+            "risk_sizing_mode": self.risk_sizing_mode,
+            "starting_balance_usd": round(self.starting_balance_usd, 6),
+            "risk_per_trade_pct": round(self.risk_per_trade_pct, 6),
+            "paper_risk_usd": None if self.paper_risk_usd is None else round(float(self.paper_risk_usd), 6),
             "symbol_confidence": self.symbol_confidence,
             "min_rr_floor": round(self.min_rr_floor, 4),
             "min_trend_strength": round(self.min_trend_strength, 6),
@@ -985,6 +1063,20 @@ class LiveAdaptivePaperTrader:
             "execute_min_expectancy_r": round(self.execute_min_expectancy_r, 6),
             "execute_min_score": round(self.execute_min_score, 6),
             "execute_min_win_probability": round(self.execute_min_win_probability, 6),
+            "filter_rejections": dict(self.filter_rejections),
+            "max_open_trades": int(self.max_open_trades),
+            "open_trades_count": len(self.open_trades),
+            "open_trades": [
+                {
+                    "symbol": managed.signal.symbol,
+                    "timeframe": managed.signal.timeframe,
+                    "side": managed.signal.side,
+                    "entry": managed.signal.entry,
+                    "bars_seen": managed.bars_seen,
+                    "best_r": round(managed.best_r, 6),
+                }
+                for managed in self.open_trades.values()
+            ],
             "possible_trades_limit": int(self.possible_trades_limit),
             "max_parallel_candidates": int(self.max_parallel_candidates),
             "global_pause_cycles_left": int(self.global_pause_cycles_left),
@@ -994,6 +1086,276 @@ class LiveAdaptivePaperTrader:
             "blocked_symbols": blocked_symbols,
             "symbol_health": symbol_health,
         }
+
+    @staticmethod
+    def _current_r_multiple(side: str, entry: float, stop_loss: float, price: float) -> float:
+        risk = max(abs(entry - stop_loss), 1e-9)
+        pnl_per_unit = price - entry if side == "LONG" else entry - price
+        return pnl_per_unit / risk
+
+    def _make_managed_trade(self, signal: Signal, binance_opened: bool) -> ManagedTrade:
+        engine = TradeEngine(risk_usd=self.risk_usd)
+        opened = engine.maybe_open_trade(signal)
+        if not opened:
+            raise RuntimeError("Failed to open paper trade")
+
+        timeframe_minutes = self._timeframe_minutes(signal.timeframe)
+        candle_based_wait = self.max_wait_candles * timeframe_minutes
+        effective_wait_minutes = min(self.max_wait_minutes_per_trade, max(candle_based_wait, timeframe_minutes * 2))
+        return ManagedTrade(
+            signal=signal,
+            engine=engine,
+            start_time=time.time(),
+            timeframe_minutes=timeframe_minutes,
+            max_wait_seconds=effective_wait_minutes * 60,
+            last_seen_close_ms=signal.signal_time_ms,
+            best_r=0.0,
+            original_risk=max(abs(signal.entry - signal.stop_loss), 1e-9),
+            bars_seen=0,
+            consecutive_adverse_bars=0,
+            moved_to_break_even=False,
+            trailing_stop_active=False,
+            consecutive_fetch_errors=0,
+            last_known_candles=None,
+            binance_opened=binance_opened,
+        )
+
+    def _make_exit(self, managed: ManagedTrade, latest, reason_prefix: str) -> ClosedTrade:
+        active = managed.engine.active_trade
+        if active is None:
+            raise RuntimeError("Active trade missing while building exit")
+
+        pnl_per_unit = latest.close - active.entry if active.side == "LONG" else active.entry - latest.close
+        gross_r = pnl_per_unit / managed.original_risk
+        cost_r = self.cost_model.trade_cost_r(active.entry, managed.signal.stop_loss)
+        net_r = gross_r - cost_r
+        return ClosedTrade(
+            symbol=active.symbol,
+            timeframe=active.timeframe,
+            side=active.side,
+            entry=active.entry,
+            take_profit=active.take_profit,
+            stop_loss=active.stop_loss,
+            exit_price=latest.close,
+            result="WIN" if net_r > 0 else "LOSS",
+            opened_at_ms=active.opened_at_ms,
+            closed_at_ms=latest.close_time_ms,
+            pnl_r=net_r,
+            pnl_usd=net_r * self.risk_usd,
+            reason=f"{reason_prefix} | {active.reason}",
+        )
+
+    def _close_binance_trade(self, closed: ClosedTrade) -> bool:
+        if not self.executor.enabled:
+            return False
+
+        binance_closed = False
+        try:
+            has_position = self.executor.has_open_position(closed.symbol)
+            if has_position:
+                close_result = self.executor.close_trade(
+                    symbol=closed.symbol,
+                    side=closed.side,
+                    reason=closed.reason,
+                )
+                binance_closed = close_result.get("executed", False)
+                print(
+                    json.dumps({
+                        "type": "BINANCE_ORDER",
+                        "time": self._now_iso(),
+                        "action": "CLOSE",
+                        "symbol": closed.symbol,
+                        "side": closed.side,
+                        "result": close_result,
+                    })
+                )
+                if not binance_closed or self.executor.has_open_position(closed.symbol):
+                    time.sleep(1)
+                    retry = self.executor.close_trade(closed.symbol, closed.side, "RETRY_CLOSE")
+                    binance_closed = retry.get("executed", False)
+                    print(
+                        json.dumps({
+                            "type": "BINANCE_ORDER",
+                            "time": self._now_iso(),
+                            "action": "RETRY_CLOSE",
+                            "symbol": closed.symbol,
+                            "result": retry,
+                        })
+                    )
+        except Exception as exc:
+            print(
+                json.dumps({
+                    "type": "BINANCE_ORDER",
+                    "time": self._now_iso(),
+                    "action": "CLOSE_FAILED",
+                    "symbol": closed.symbol,
+                    "error": str(exc),
+                })
+            )
+        return binance_closed
+
+    def _finalize_closed_trade(self, closed: ClosedTrade, cycle: int, binance_opened: bool, binance_closed: bool) -> None:
+        self._record_trade(closed)
+        self._apply_feedback(closed)
+        self._apply_loss_guard(closed, cycle)
+        self._apply_performance_guard(cycle)
+        print(
+            json.dumps(
+                {
+                    "type": "TRADE_RESULT",
+                    "time": self._now_iso(),
+                    "cycle": cycle,
+                    "trade": asdict(closed),
+                    "summary": self._summary(),
+                    "binance_executed": binance_opened,
+                    "binance_closed": binance_closed,
+                }
+            )
+        )
+
+    def _update_managed_trade(self, managed: ManagedTrade) -> Optional[ClosedTrade]:
+        if time.time() - managed.start_time >= managed.max_wait_seconds and managed.last_known_candles:
+            return self._make_exit(managed, managed.last_known_candles[-1], "TIMEOUT_EXIT")
+
+        try:
+            candles = self.client.fetch_klines(symbol=managed.signal.symbol, interval=managed.signal.timeframe, limit=10)
+            managed.last_known_candles = candles
+            managed.consecutive_fetch_errors = 0
+        except Exception as exc:
+            managed.consecutive_fetch_errors += 1
+            print(json.dumps({
+                "type": "TRADE_MONITOR_FETCH_ERROR",
+                "time": self._now_iso(),
+                "symbol": managed.signal.symbol,
+                "error": str(exc),
+                "consecutive_errors": managed.consecutive_fetch_errors,
+            }))
+            if managed.consecutive_fetch_errors >= 5 and managed.last_known_candles:
+                return self._make_exit(managed, managed.last_known_candles[-1], "NETWORK_ERROR_EXIT")
+            return None
+
+        closed_candles = [c for c in candles if c.close_time_ms < int(time.time() * 1000)]
+        if not closed_candles:
+            return None
+
+        latest = closed_candles[-1]
+        if latest.close_time_ms <= managed.last_seen_close_ms:
+            return None
+
+        managed.last_seen_close_ms = latest.close_time_ms
+        active = managed.engine.active_trade
+        if active is None:
+            raise RuntimeError("Active trade missing while updating managed trade")
+
+        managed.bars_seen += 1
+        now_r = self._current_r_multiple(active.side, active.entry, managed.signal.stop_loss, latest.close)
+        favorable_price = latest.high if active.side == "LONG" else latest.low
+        peak_r = self._current_r_multiple(active.side, active.entry, managed.signal.stop_loss, favorable_price)
+        managed.best_r = max(managed.best_r, peak_r)
+
+        if now_r < 0:
+            managed.consecutive_adverse_bars += 1
+        else:
+            managed.consecutive_adverse_bars = 0
+
+        closed = managed.engine.on_candle(latest)
+        if closed:
+            return closed
+
+        active = managed.engine.active_trade
+        if active is None:
+            raise RuntimeError("Active trade missing after candle update")
+
+        if self.enable_trailing_stop and managed.best_r >= self.trail_trigger_r:
+            trail_sl_r = managed.best_r * self.trail_keep_pct
+            if active.side == "LONG":
+                new_sl = active.entry + (trail_sl_r * managed.original_risk)
+                if new_sl > active.stop_loss:
+                    active.stop_loss = new_sl
+            else:
+                new_sl = active.entry - (trail_sl_r * managed.original_risk)
+                if new_sl < active.stop_loss:
+                    active.stop_loss = new_sl
+
+            action = "TRAILING_STOP_UPDATED" if managed.trailing_stop_active else "TRAILING_STOP_ACTIVATED"
+            managed.trailing_stop_active = True
+            payload = {
+                "type": "RISK_MANAGER_UPDATE",
+                "time": self._now_iso(),
+                "symbol": active.symbol,
+                "timeframe": active.timeframe,
+                "action": action,
+                "updated_stop_loss": round(active.stop_loss, 6),
+                "best_r": round(managed.best_r, 4),
+            }
+            if action == "TRAILING_STOP_ACTIVATED":
+                payload["trail_keep_pct"] = self.trail_keep_pct
+            print(json.dumps(payload))
+
+        elif self.enable_break_even and (not managed.moved_to_break_even) and managed.best_r >= self.break_even_trigger_r:
+            risk = max(abs(active.entry - active.stop_loss), 1e-9)
+            if active.side == "LONG":
+                be_stop = active.entry + (self.break_even_offset_r * risk)
+                if be_stop > active.stop_loss:
+                    active.stop_loss = be_stop
+                    managed.moved_to_break_even = True
+            else:
+                be_stop = active.entry + (self.break_even_offset_r * risk)
+                if be_stop < active.stop_loss:
+                    active.stop_loss = be_stop
+                    managed.moved_to_break_even = True
+
+            if managed.moved_to_break_even:
+                print(
+                    json.dumps(
+                        {
+                            "type": "RISK_MANAGER_UPDATE",
+                            "time": self._now_iso(),
+                            "symbol": active.symbol,
+                            "timeframe": active.timeframe,
+                            "action": "STOP_TO_BREAKEVEN",
+                            "updated_stop_loss": round(active.stop_loss, 6),
+                            "best_r": round(managed.best_r, 6),
+                        }
+                    )
+                )
+
+        worst_price = latest.low if active.side == "LONG" else latest.high
+        adverse_r = self._current_r_multiple(active.side, active.entry, managed.signal.stop_loss, worst_price)
+        if adverse_r <= (-1.0 * self.max_adverse_r_cut):
+            return self._make_exit(managed, latest, "ADVERSE_CUT")
+
+        if (
+            managed.consecutive_adverse_bars >= self.momentum_reversal_bars
+            and now_r <= self.momentum_reversal_r
+        ):
+            print(json.dumps({
+                "type": "RISK_MANAGER_UPDATE",
+                "time": self._now_iso(),
+                "symbol": active.symbol,
+                "timeframe": active.timeframe,
+                "action": "MOMENTUM_REVERSAL_EXIT",
+                "now_r": round(now_r, 4),
+                "consecutive_adverse_bars": managed.consecutive_adverse_bars,
+            }))
+            return self._make_exit(managed, latest, "MOMENTUM_REVERSAL")
+
+        if managed.bars_seen >= self.max_stagnation_bars and managed.best_r < self.min_progress_r_for_stagnation:
+            return self._make_exit(managed, latest, "STAGNATION_EXIT")
+
+        if managed.bars_seen >= self.max_wait_candles:
+            return self._make_exit(managed, latest, "CANDLE_TIMEOUT")
+
+        return None
+
+    def _update_open_trades(self, cycle: int) -> None:
+        for key, managed in list(self.open_trades.items()):
+            closed = self._update_managed_trade(managed)
+            if closed is None:
+                continue
+            binance_closed = self._close_binance_trade(closed)
+            del self.open_trades[key]
+            self._finalize_closed_trade(closed, cycle, managed.binance_opened, binance_closed)
 
     def run(self) -> Dict:
         cycles = 0
@@ -1011,13 +1373,18 @@ class LiveAdaptivePaperTrader:
                     snapshots.append({"symbol": symbol, "price": price, "time": 0})
             print(json.dumps({"type": "LIVE_MARKET", "time": self._now_iso(), "snapshots": snapshots}))
 
+            self._update_open_trades(cycles)
+
             candidates = self._signal_candidates()
             candidate_win_prob = {id(c): self._estimate_win_probability(c) for c in candidates}
             possible_trades = []
+            candidate_rejections: Dict[str, int] = defaultdict(int)
             for candidate in candidates:
                 if candidate.signal.confidence < self.min_candidate_confidence:
+                    candidate_rejections["candidate_confidence"] += 1
                     continue
                 if candidate.expectancy_r < self.min_candidate_expectancy_r:
+                    candidate_rejections["candidate_expectancy"] += 1
                     continue
                 win_probability = candidate_win_prob.get(id(candidate), self._estimate_win_probability(candidate))
                 bucket = self._probability_bucket(win_probability)
@@ -1058,6 +1425,7 @@ class LiveAdaptivePaperTrader:
                         "possible_trades_limit": self.possible_trades_limit,
                         "total_candidates_seen": len(candidates),
                         "total_possible_trades": len(possible_trades),
+                        "candidate_rejections": dict(candidate_rejections),
                         "probability_categories": probability_categories,
                         "blocked_symbols": [
                             {"symbol": s, "cooldown_cycles_left": int(self.symbol_cooldowns.get(s, 0))}
@@ -1107,20 +1475,35 @@ class LiveAdaptivePaperTrader:
                 confirmations.setdefault(key, set()).add(candidate.signal.timeframe)
 
             qualified: List[CandidateSignal] = []
+            execution_rejections: Dict[str, int] = defaultdict(int)
+            open_trade_symbols = self._open_trade_symbols()
             for candidate in candidates:
                 if candidate.signal.confidence < self.execute_min_confidence:
+                    execution_rejections["execute_confidence"] += 1
                     continue
                 if candidate.expectancy_r < self.execute_min_expectancy_r:
+                    execution_rejections["execute_expectancy"] += 1
                     continue
                 if candidate.score < self.execute_min_score:
+                    execution_rejections["execute_score"] += 1
                     continue
                 win_probability = candidate_win_prob.get(id(candidate), self._estimate_win_probability(candidate))
                 if win_probability < self.execute_min_win_probability:
+                    execution_rejections["execute_win_probability"] += 1
                     continue
                 if self.require_dual_timeframe_confirm:
                     if len(confirmations.get((candidate.signal.symbol, candidate.signal.side), set())) < 2:
+                        execution_rejections["execute_dual_timeframe_confirm"] += 1
                         continue
+                if candidate.signal.symbol in open_trade_symbols:
+                    execution_rejections["execute_symbol_already_open"] += 1
+                    continue
                 qualified.append(candidate)
+
+            for key, count in candidate_rejections.items():
+                self.filter_rejections[key] += count
+            for key, count in execution_rejections.items():
+                self.filter_rejections[key] += count
 
             if not qualified:
                 self.no_trade_filter_block_streak += 1
@@ -1136,11 +1519,30 @@ class LiveAdaptivePaperTrader:
                             "execute_min_expectancy_r": self.execute_min_expectancy_r,
                             "execute_min_score": self.execute_min_score,
                             "execute_min_win_probability": self.execute_min_win_probability,
+                            "execution_rejections": dict(execution_rejections),
                             "no_trade_filter_block_streak": self.no_trade_filter_block_streak,
                         }
                     )
                 )
                 self._maybe_relax_execution_filters(cycles, len(candidates))
+                time.sleep(self.poll_seconds)
+                continue
+
+            available_slots = max(0, self.max_open_trades - len(self.open_trades))
+            if available_slots <= 0:
+                self.no_trade_filter_block_streak = 0
+                print(
+                    json.dumps(
+                        {
+                            "type": "NO_SIGNAL",
+                            "time": self._now_iso(),
+                            "cycle": cycles,
+                            "reason": "MAX_OPEN_TRADES_REACHED",
+                            "max_open_trades": self.max_open_trades,
+                            "open_trades_count": len(self.open_trades),
+                        }
+                    )
+                )
                 time.sleep(self.poll_seconds)
                 continue
 
@@ -1162,138 +1564,95 @@ class LiveAdaptivePaperTrader:
                 time.sleep(self.poll_seconds)
                 continue
 
-            selected = qualified[: self.top_n][0]
-            selected_win_probability = candidate_win_prob.get(id(selected), self._estimate_win_probability(selected))
-            selected_bucket = self._probability_bucket(selected_win_probability)
             self.no_trade_filter_block_streak = 0
-            play_trade_alert(self.enable_sound)
-            print(
-                json.dumps(
-                    {
-                        "type": "OPEN_TRADE",
-                        "time": self._now_iso(),
-                        "cycle": cycles,
-                        "symbol": selected.signal.symbol,
-                        "timeframe": selected.signal.timeframe,
-                        "side": selected.signal.side,
-                        "entry": selected.signal.entry,
-                        "take_profit": selected.signal.take_profit,
-                        "stop_loss": selected.signal.stop_loss,
-                        "confidence": selected.signal.confidence,
-                        "trend_strength": round(selected.trend_strength, 6),
-                        "cost_r": round(selected.cost_r, 6),
-                        "score": round(selected.score, 6),
-                        "symbol_quality": round(selected.symbol_quality, 6),
-                        "win_probability": round(selected_win_probability, 6),
-                        "probability_bucket": selected_bucket["id"],
-                        "probability_bucket_label": selected_bucket["label"],
-                        "reason": selected.signal.reason,
-                    }
+            selected_candidates: List[CandidateSignal] = []
+            seen_symbols = set(self._open_trade_symbols())
+            for candidate in qualified:
+                if candidate.signal.symbol in seen_symbols:
+                    continue
+                selected_candidates.append(candidate)
+                seen_symbols.add(candidate.signal.symbol)
+                if len(selected_candidates) >= min(self.top_n, available_slots):
+                    break
+
+            if not selected_candidates:
+                print(
+                    json.dumps(
+                        {
+                            "type": "NO_SIGNAL",
+                            "time": self._now_iso(),
+                            "cycle": cycles,
+                            "reason": "ALL_QUALIFIED_SYMBOLS_ALREADY_OPEN",
+                            "open_trade_symbols": sorted(self._open_trade_symbols()),
+                        }
+                    )
                 )
-            )
+                time.sleep(self.poll_seconds)
+                continue
 
-            # Execute on Binance (demo or live)
-            binance_opened = False
-            binance_closed = False
-            if self.executor.enabled:
-                try:
-                    exec_result = self.executor.open_trade(
-                        symbol=selected.signal.symbol,
-                        side=selected.signal.side,
-                        entry_price=selected.signal.entry,
-                        stop_loss=selected.signal.stop_loss,
-                        take_profit=selected.signal.take_profit,
-                    )
-                    binance_opened = exec_result.get("executed", False)
-                    print(
-                        json.dumps({
-                            "type": "BINANCE_ORDER",
+            for selected in selected_candidates:
+                selected_win_probability = candidate_win_prob.get(id(selected), self._estimate_win_probability(selected))
+                selected_bucket = self._probability_bucket(selected_win_probability)
+                play_trade_alert(self.enable_sound)
+                print(
+                    json.dumps(
+                        {
+                            "type": "OPEN_TRADE",
                             "time": self._now_iso(),
-                            "action": "OPEN",
+                            "cycle": cycles,
                             "symbol": selected.signal.symbol,
+                            "timeframe": selected.signal.timeframe,
                             "side": selected.signal.side,
-                            "result": exec_result,
-                        })
+                            "entry": selected.signal.entry,
+                            "take_profit": selected.signal.take_profit,
+                            "stop_loss": selected.signal.stop_loss,
+                            "confidence": selected.signal.confidence,
+                            "trend_strength": round(selected.trend_strength, 6),
+                            "cost_r": round(selected.cost_r, 6),
+                            "score": round(selected.score, 6),
+                            "symbol_quality": round(selected.symbol_quality, 6),
+                            "win_probability": round(selected_win_probability, 6),
+                            "probability_bucket": selected_bucket["id"],
+                            "probability_bucket_label": selected_bucket["label"],
+                            "reason": selected.signal.reason,
+                        }
                     )
-                except Exception as exc:
-                    print(
-                        json.dumps({
-                            "type": "BINANCE_ORDER",
-                            "time": self._now_iso(),
-                            "action": "OPEN_FAILED",
-                            "symbol": selected.signal.symbol,
-                            "error": str(exc),
-                        })
-                    )
+                )
 
-            closed = self._wait_for_close(selected.signal)
-
-            # Always try to close on Binance — check for position regardless of open result
-            if self.executor.enabled:
-                try:
-                    # Check if there's actually a position to close
-                    has_position = self.executor.has_open_position(closed.symbol)
-                    if has_position:
-                        close_result = self.executor.close_trade(
-                            symbol=closed.symbol,
-                            side=closed.side,
-                            reason=closed.reason,
+                binance_opened = False
+                if self.executor.enabled:
+                    try:
+                        exec_result = self.executor.open_trade(
+                            symbol=selected.signal.symbol,
+                            side=selected.signal.side,
+                            entry_price=selected.signal.entry,
+                            stop_loss=selected.signal.stop_loss,
+                            take_profit=selected.signal.take_profit,
                         )
-                        binance_closed = close_result.get("executed", False)
+                        binance_opened = exec_result.get("executed", False)
                         print(
                             json.dumps({
                                 "type": "BINANCE_ORDER",
                                 "time": self._now_iso(),
-                                "action": "CLOSE",
-                                "symbol": closed.symbol,
-                                "side": closed.side,
-                                "result": close_result,
+                                "action": "OPEN",
+                                "symbol": selected.signal.symbol,
+                                "side": selected.signal.side,
+                                "result": exec_result,
                             })
                         )
-                        # Verify position is actually closed
-                        if not binance_closed or self.executor.has_open_position(closed.symbol):
-                            # Force close with retry
-                            time.sleep(1)
-                            retry = self.executor.close_trade(closed.symbol, closed.side, "RETRY_CLOSE")
-                            binance_closed = retry.get("executed", False)
-                            print(
-                                json.dumps({
-                                    "type": "BINANCE_ORDER",
-                                    "time": self._now_iso(),
-                                    "action": "RETRY_CLOSE",
-                                    "symbol": closed.symbol,
-                                    "result": retry,
-                                })
-                            )
-                except Exception as exc:
-                    print(
-                        json.dumps({
-                            "type": "BINANCE_ORDER",
-                            "time": self._now_iso(),
-                            "action": "CLOSE_FAILED",
-                            "symbol": closed.symbol,
-                            "error": str(exc),
-                        })
-                    )
+                    except Exception as exc:
+                        print(
+                            json.dumps({
+                                "type": "BINANCE_ORDER",
+                                "time": self._now_iso(),
+                                "action": "OPEN_FAILED",
+                                "symbol": selected.signal.symbol,
+                                "error": str(exc),
+                            })
+                        )
 
-            self._record_trade(closed)
-            self._apply_feedback(closed)
-            self._apply_loss_guard(closed, cycles)
-            self._apply_performance_guard(cycles)
-
-            print(
-                json.dumps(
-                    {
-                        "type": "TRADE_RESULT",
-                        "time": self._now_iso(),
-                        "cycle": cycles,
-                        "trade": asdict(closed),
-                        "summary": self._summary(),
-                        "binance_executed": binance_opened,
-                        "binance_closed": binance_closed,
-                    }
-                )
-            )
+                key = f"{selected.signal.symbol}:{selected.signal.timeframe}:{selected.signal.side}"
+                self.open_trades[key] = self._make_managed_trade(selected.signal, binance_opened)
 
             summary = self._summary()
             if (
