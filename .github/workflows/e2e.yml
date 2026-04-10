@@ -27,8 +27,24 @@ jobs:
 
       - name: Start dashboard server
         run: |
-          python services/frontend/server.py --mongo-required 0 --config-file services/backend/config.json --static-dir services/frontend &
-          sleep 3
+          python services/frontend/server.py \
+            --host 127.0.0.1 \
+            --mongo-required 0 \
+            --config-file services/backend/config.json \
+            --static-dir services/frontend \
+            > /tmp/crypto_e2e_frontend.log 2>&1 &
+
+      - name: Wait for dashboard readiness
+        run: |
+          for i in $(seq 1 20); do
+            if curl -sf http://127.0.0.1:8787/api/state > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Dashboard did not become ready in time"
+          sed -n '1,220p' /tmp/crypto_e2e_frontend.log || true
+          exit 1
 
       - name: Verify dashboard responds
         run: |
@@ -46,5 +62,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: e2e-logs
-          path: /tmp/crypto-runtime/*.jsonl
+          path: |
+            /tmp/crypto-runtime/*.jsonl
+            /tmp/crypto_e2e_frontend.log
           retention-days: 7

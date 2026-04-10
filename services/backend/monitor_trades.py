@@ -12,8 +12,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-EVENTS_FILE = PROJECT_ROOT / "data" / "live_events.jsonl"
-REPORTS_FILE = PROJECT_ROOT / "data" / "monitor_reports.jsonl"
+RUNTIME_DIR = Path(os.environ.get("CRYPTO_RUNTIME_DIR", "/tmp/crypto-runtime"))
+EVENTS_FILE = RUNTIME_DIR / "live_events.jsonl"
+REPORTS_FILE = RUNTIME_DIR / "monitor_reports.jsonl"
 DEFAULT_INTERVAL_SEC = 300
 
 

@@ -17,7 +17,9 @@ jobs:
           types: |
             feat
             fix
+            Fix
             docs
+            Docs
             style
             refactor
             perf

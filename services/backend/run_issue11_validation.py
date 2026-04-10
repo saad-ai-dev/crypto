@@ -9,7 +9,11 @@ from src.issue11_validation import compare_summaries, load_trade_records, summar
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Issue #11 validation report from trade history JSONL.")
-    parser.add_argument("--history", default="data/live_events_history.jsonl", help="Current history JSONL file")
+    parser.add_argument(
+        "--history",
+        default="/tmp/crypto-runtime/live_events.jsonl",
+        help="Current runtime events JSONL file",
+    )
     parser.add_argument("--baseline", default="", help="Optional baseline history JSONL file for before/after comparison")
     args = parser.parse_args()
 

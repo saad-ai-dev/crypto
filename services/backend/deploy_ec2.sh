@@ -2,6 +2,7 @@
 set -euo pipefail
 
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$APP_DIR/../.." && pwd)"
 SERVICE_NAME="${SERVICE_NAME:-crypto-trader}"
 RUN_USER="${RUN_USER:-${SUDO_USER:-$(id -un)}}"
 RUN_GROUP="${RUN_GROUP:-$RUN_USER}"
@@ -146,7 +147,7 @@ ensure_python_env() {
     exit 1
   fi
 
-  cd "$APP_DIR"
+  cd "$REPO_DIR"
 
   if [ ! -d ".venv" ]; then
     log "Creating virtual environment"
@@ -154,7 +155,7 @@ ensure_python_env() {
   fi
 
   # shellcheck disable=SC1091
-  source "$APP_DIR/.venv/bin/activate"
+  source "$REPO_DIR/.venv/bin/activate"
 
   log "Installing Python dependencies"
   python -m pip install --upgrade pip setuptools wheel
@@ -163,9 +164,10 @@ ensure_python_env() {
   fi
 
   log "Compiling Python files"
-  python -m py_compile $(find "$APP_DIR" -type f -name '*.py' -not -path '*/.venv/*')
+  python -m py_compile $(find "$APP_DIR" -type f -name '*.py' -not -path '*/.venv/*') "$REPO_DIR/services/frontend/server.py"
 
   log "Validating run scripts"
+  bash -n "$REPO_DIR/start.sh"
   bash -n "$APP_DIR/run_all.sh"
   if [ -f "$APP_DIR/fetch_live_cache.sh" ]; then
     bash -n "$APP_DIR/fetch_live_cache.sh"
@@ -178,7 +180,7 @@ write_runtime_wrapper() {
   cat > "$wrapper" <<WRAP
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$APP_DIR"
+cd "$REPO_DIR"
 export FRONTEND_HOST="$FRONTEND_HOST"
 export FRONTEND_PORT="$FRONTEND_PORT"
 export START_FRONTEND=1
@@ -187,7 +189,7 @@ export SKIP_OPTIMIZE="$SKIP_OPTIMIZE"
 export MONGO_URI="$MONGO_URI"
 export MONGO_DB="$MONGO_DB"
 export MONGO_REQUIRED=1
-exec "$APP_DIR/run_all.sh"
+exec "$REPO_DIR/start.sh"
 WRAP
 
   chmod +x "$wrapper"
@@ -211,7 +213,7 @@ Wants=network-online.target
 Type=simple
 User=$RUN_USER
 Group=$RUN_GROUP
-WorkingDirectory=$APP_DIR
+WorkingDirectory=$REPO_DIR
 Environment=PYTHONUNBUFFERED=1
 ExecStart=$APP_DIR/start_production.sh
 Restart=always
@@ -245,6 +247,7 @@ show_status() {
 
 main() {
   log "App dir: $APP_DIR"
+  log "Repo dir: $REPO_DIR"
   log "Run user: $RUN_USER"
   log "Mongo mode: $MONGO_MODE"
 
