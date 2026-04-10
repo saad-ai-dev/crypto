@@ -175,6 +175,7 @@ class LiveAdaptivePaperTrader:
         self.global_pause_cycles = int(loss_guard_cfg.get("global_pause_cycles", 4))
         self.max_symbol_consecutive_losses = int(loss_guard_cfg.get("max_symbol_consecutive_losses", 2))
         self.symbol_pause_cycles = int(loss_guard_cfg.get("symbol_pause_cycles", max(4, self.guard_cooldown_cycles)))
+        self.daily_loss_limit_r = float(live_cfg.get("daily_loss_limit_r", 0.0))
 
         # Rotating klines window: scan a subset of symbols each cycle
         self.klines_window_size = int(live_cfg.get("klines_window_size", 20))
@@ -207,6 +208,7 @@ class LiveAdaptivePaperTrader:
         self.filter_rejections: Dict[str, int] = defaultdict(int)
         self.open_trades: Dict[str, ManagedTrade] = {}
         self._emitted_trade_result_keys: set[str] = set()
+        self._daily_loss_pause_day: Optional[str] = None
 
         # Binance order executor (demo or live)
         self.executor = BinanceExecutor.from_env(config)
@@ -337,6 +339,25 @@ class LiveAdaptivePaperTrader:
         max_symbol = max(self.guard_symbol_window * 3, 20)
         if len(bucket) > max_symbol:
             del bucket[:-max_symbol]
+
+    @staticmethod
+    def _utc_day_from_ms(timestamp_ms: int) -> str:
+        return datetime.fromtimestamp(int(timestamp_ms) / 1000.0, tz=timezone.utc).date().isoformat()
+
+    def _current_utc_day(self) -> str:
+        return datetime.now(timezone.utc).date().isoformat()
+
+    def _daily_realized_pnl(self, utc_day: Optional[str] = None) -> Dict[str, float | int | str]:
+        day = utc_day or self._current_utc_day()
+        realized = [trade for trade in self.recent_trades if self._utc_day_from_ms(trade.closed_at_ms) == day]
+        pnl_r = sum(float(trade.pnl_r) for trade in realized)
+        pnl_usd = sum(float(trade.pnl_usd) for trade in realized)
+        return {
+            "utc_day": day,
+            "trades": len(realized),
+            "pnl_r": round(pnl_r, 6),
+            "pnl_usd": round(pnl_usd, 6),
+        }
 
     def _apply_performance_guard(self, cycle: int) -> None:
         if not self.guard_enabled:
@@ -1221,6 +1242,7 @@ class LiveAdaptivePaperTrader:
             for s in self.symbols
             if int(self.symbol_cooldowns.get(s, 0)) > 0
         ]
+        daily_realized = self._daily_realized_pnl()
         return {
             "trades": trades,
             "wins": wins,
@@ -1259,6 +1281,9 @@ class LiveAdaptivePaperTrader:
             "max_parallel_candidates": int(self.max_parallel_candidates),
             "global_pause_cycles_left": int(self.global_pause_cycles_left),
             "global_consecutive_losses": int(self.global_consecutive_losses),
+            "daily_loss_limit_r": round(self.daily_loss_limit_r, 6),
+            "daily_loss_pause_day": self._daily_loss_pause_day,
+            "daily_realized_pnl": daily_realized,
             "no_trade_filter_block_streak": int(self.no_trade_filter_block_streak),
             "active_symbols": self._active_symbols(),
             "blocked_symbols": blocked_symbols,
@@ -1583,6 +1608,21 @@ class LiveAdaptivePaperTrader:
             self._apply_runtime_control()
             self._decrement_cooldowns()
             cycles += 1
+            current_day = self._current_utc_day()
+
+            if self._daily_loss_pause_day is not None and self._daily_loss_pause_day != current_day:
+                print(
+                    json.dumps(
+                        {
+                            "type": "DAILY_LOSS_LIMIT_CLEARED",
+                            "time": self._now_iso(),
+                            "cycle": cycles,
+                            "previous_day": self._daily_loss_pause_day,
+                            "current_day": current_day,
+                        }
+                    )
+                )
+                self._daily_loss_pause_day = None
 
             self._refresh_batch_market_data()
             snapshots = []
@@ -1593,6 +1633,46 @@ class LiveAdaptivePaperTrader:
             print(json.dumps({"type": "LIVE_MARKET", "time": self._now_iso(), "snapshots": snapshots}))
 
             self._update_open_trades(cycles)
+
+            daily_realized = self._daily_realized_pnl(current_day)
+            if (
+                self.daily_loss_limit_r > 0
+                and self._daily_loss_pause_day is None
+                and float(daily_realized["pnl_r"]) <= (-1.0 * self.daily_loss_limit_r)
+            ):
+                self._daily_loss_pause_day = current_day
+                print(
+                    json.dumps(
+                        {
+                            "type": "DAILY_LOSS_LIMIT_PAUSE",
+                            "time": self._now_iso(),
+                            "cycle": cycles,
+                            "utc_day": current_day,
+                            "daily_loss_limit_r": round(self.daily_loss_limit_r, 6),
+                            "daily_realized_pnl_r": daily_realized["pnl_r"],
+                            "daily_realized_pnl_usd": daily_realized["pnl_usd"],
+                        }
+                    )
+                )
+
+            if self._daily_loss_pause_day == current_day:
+                self.no_trade_filter_block_streak = 0
+                print(
+                    json.dumps(
+                        {
+                            "type": "NO_SIGNAL",
+                            "time": self._now_iso(),
+                            "cycle": cycles,
+                            "reason": "DAILY_LOSS_LIMIT_PAUSED",
+                            "utc_day": current_day,
+                            "daily_loss_limit_r": round(self.daily_loss_limit_r, 6),
+                            "daily_realized_pnl_r": daily_realized["pnl_r"],
+                            "daily_realized_pnl_usd": daily_realized["pnl_usd"],
+                        }
+                    )
+                )
+                time.sleep(self.poll_seconds)
+                continue
 
             candidates = self._signal_candidates()
             candidate_win_prob = {id(c): self._estimate_win_probability(c) for c in candidates}

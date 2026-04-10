@@ -7,7 +7,7 @@ from typing import Iterable, List
 
 from src.cache_loader import load_market_datasets_from_cache
 from src.config import load_config
-from src.ml_pipeline import MLWalkForwardOptimizer
+from src.ml_pipeline import MLWalkForwardOptimizer, WalkForwardResult
 
 
 def list_missing_cache_files(cache_dir: str, symbols: Iterable[str], timeframes: Iterable[str]) -> List[str]:
@@ -23,6 +23,17 @@ def list_missing_cache_files(cache_dir: str, symbols: Iterable[str], timeframes:
             if not path.exists():
                 missing.append(str(path))
     return missing
+
+
+def should_apply_candidate_over_baseline(candidate: WalkForwardResult, baseline: WalkForwardResult) -> bool:
+    expectancy_delta = float(candidate.expectancy_r) - float(baseline.expectancy_r)
+    if float(candidate.expectancy_r) <= 0.0:
+        return False
+    if expectancy_delta < 0.01:
+        return False
+    if float(candidate.win_rate) + 0.02 < float(baseline.win_rate):
+        return False
+    return True
 
 
 def main() -> None:
@@ -115,23 +126,34 @@ def main() -> None:
         fee_bps_per_side=fee_bps,
         slippage_bps_per_side=slippage_bps,
     )
+    baseline_samples = optimizer.generate_samples(datasets=datasets, strategy_payload=config["strategy"])
+    baseline_result = optimizer.walk_forward(
+        samples=baseline_samples,
+        strategy_payload=config["strategy"],
+        target_trades=args.target_trades,
+        initial_train_frac=args.initial_train_frac,
+    )
     if args.single_strategy:
-        samples = optimizer.generate_samples(datasets=datasets, strategy_payload=config["strategy"])
-        result = optimizer.walk_forward(
-            samples=samples,
-            strategy_payload=config["strategy"],
-            target_trades=args.target_trades,
-            initial_train_frac=args.initial_train_frac,
-        )
+        result = baseline_result
         tested = 1
+        applied_strategy_source = "baseline"
+        selection_reason = "single_strategy_requested"
     else:
-        result, tested = optimizer.optimize(
+        candidate_result, tested = optimizer.optimize(
             datasets=datasets,
             base_strategy=config["strategy"],
             target_trades=args.target_trades,
             target_wins=args.target_wins,
             max_candidates=args.max_candidates,
         )
+        if should_apply_candidate_over_baseline(candidate_result, baseline_result):
+            result = candidate_result
+            applied_strategy_source = "optimized_candidate"
+            selection_reason = "candidate_outperformed_baseline"
+        else:
+            result = baseline_result
+            applied_strategy_source = "baseline"
+            selection_reason = "baseline_retained"
 
     report = {
         "tested_candidates": tested,
@@ -148,6 +170,15 @@ def main() -> None:
         "target_reached": result.total_selected_trades >= args.target_trades and result.wins >= args.target_wins,
         "tested_signals": result.tested_signals,
         "best_strategy": result.strategy,
+        "applied_strategy_source": applied_strategy_source,
+        "selection_reason": selection_reason,
+        "baseline": {
+            "selected_trades": baseline_result.total_selected_trades,
+            "wins": baseline_result.wins,
+            "losses": baseline_result.losses,
+            "win_rate": round(baseline_result.win_rate, 4),
+            "expectancy_r": round(baseline_result.expectancy_r, 4),
+        },
         "folds": [
             {
                 "fold": f.fold_index,
@@ -163,7 +194,7 @@ def main() -> None:
         "per_market": result.per_market,
     }
 
-    print(json.dumps(report, indent=2))
+    print(json.dumps(report))
 
     if args.apply_best:
         latest = load_config(str(config_path))

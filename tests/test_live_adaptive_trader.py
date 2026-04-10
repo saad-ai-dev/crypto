@@ -1,9 +1,10 @@
 import json
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 from src.live_adaptive_trader import CandidateSignal, LiveAdaptivePaperTrader
-from src.models import Candle, MarketContext, Signal
+from src.models import Candle, ClosedTrade, MarketContext, Signal
 
 
 class _DisabledExecutor:
@@ -366,6 +367,72 @@ class LiveAdaptivePaperTraderTests(unittest.TestCase):
         self.assertEqual(no_signal["reason"], "EXECUTION_FILTER_BLOCK")
         self.assertEqual(no_signal["execution_rejections"]["execute_expectancy"], 1)
         self.assertEqual(no_signal["execution_rejections"]["execute_crossover_expectancy"], 1)
+
+    def test_daily_loss_limit_pauses_new_entries_for_the_day(self) -> None:
+        cfg = _config()
+        cfg["live_loop"]["daily_loss_limit_r"] = 1.5
+        trader = _trader(cfg)
+        loss_day = "2026-04-10"
+        closed_at_ms = int(datetime(2026, 4, 10, 12, 0, tzinfo=timezone.utc).timestamp() * 1000)
+        trader._record_trade(
+            ClosedTrade(
+                symbol="BTCUSDT",
+                timeframe="5m",
+                side="LONG",
+                entry=100.0,
+                take_profit=101.0,
+                stop_loss=99.0,
+                exit_price=98.4,
+                result="LOSS",
+                opened_at_ms=closed_at_ms - 300000,
+                closed_at_ms=closed_at_ms,
+                pnl_r=-1.6,
+                pnl_usd=-0.32,
+                reason="DIRECT_SL",
+            )
+        )
+
+        printed = []
+
+        def fake_print(line: str) -> None:
+            printed.append(json.loads(line))
+
+        with patch("src.live_adaptive_trader.time.sleep", lambda *_: None), patch(
+            "src.live_adaptive_trader.print", fake_print
+        ):
+            trader._current_utc_day = lambda: loss_day
+            trader._refresh_batch_market_data = lambda: None
+            trader._signal_candidates = lambda: [_candidate("BTCUSDT", confidence=0.95, expectancy_r=0.5, score=0.95)]
+            result = trader.run()
+
+        self.assertEqual(result["status"], "MAX_CYCLES_REACHED")
+        self.assertTrue(any(event["type"] == "DAILY_LOSS_LIMIT_PAUSE" for event in printed))
+        no_signal = next(event for event in printed if event["type"] == "NO_SIGNAL")
+        self.assertEqual(no_signal["reason"], "DAILY_LOSS_LIMIT_PAUSED")
+
+    def test_daily_loss_limit_clears_on_new_utc_day(self) -> None:
+        cfg = _config()
+        cfg["live_loop"]["daily_loss_limit_r"] = 1.5
+        trader = _trader(cfg)
+        trader._daily_loss_pause_day = "2026-04-10"
+
+        printed = []
+
+        def fake_print(line: str) -> None:
+            printed.append(json.loads(line))
+
+        with patch("src.live_adaptive_trader.time.sleep", lambda *_: None), patch(
+            "src.live_adaptive_trader.print", fake_print
+        ):
+            trader._current_utc_day = lambda: "2026-04-11"
+            trader._refresh_batch_market_data = lambda: None
+            trader._signal_candidates = lambda: []
+            result = trader.run()
+
+        self.assertEqual(result["status"], "MAX_CYCLES_REACHED")
+        self.assertTrue(any(event["type"] == "DAILY_LOSS_LIMIT_CLEARED" for event in printed))
+        no_signal = next(event for event in printed if event["type"] == "NO_SIGNAL")
+        self.assertEqual(no_signal["reason"], "NO_CANDIDATES")
 
 
 if __name__ == "__main__":

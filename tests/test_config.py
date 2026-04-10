@@ -71,6 +71,12 @@ class ConfigValidationTests(unittest.TestCase):
         errors = validate_config(cfg)
         self.assertTrue(any("paper_risk_usd" in e for e in errors))
 
+    def test_non_positive_daily_loss_limit_detected(self) -> None:
+        cfg = _valid_config()
+        cfg["live_loop"]["daily_loss_limit_r"] = 0.0
+        errors = validate_config(cfg)
+        self.assertTrue(any("daily_loss_limit_r" in e for e in errors))
+
 
 if __name__ == "__main__":
     unittest.main()
