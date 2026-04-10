@@ -30,8 +30,8 @@ jobs:
           python services/frontend/server.py \
             --host 127.0.0.1 \
             --mongo-required 0 \
-            --config-file services/backend/config.json \
-            --static-dir services/frontend \
+            --config-file "$PWD/services/backend/config.json" \
+            --static-dir "$PWD/services/frontend" \
             > /tmp/crypto_e2e_frontend.log 2>&1 &
 
       - name: Wait for dashboard readiness
