@@ -42,6 +42,7 @@ def validate_config(cfg: Dict[str, Any]) -> List[str]:
     starting_balance = account.get("starting_balance_usd")
     risk_per_trade_pct = account.get("risk_per_trade_pct")
     paper_risk_usd = account.get("paper_risk_usd")
+    max_position_pct = account.get("max_position_pct")
 
     if starting_balance is not None and float(starting_balance) <= 0:
         errors.append("account.starting_balance_usd must be > 0")
@@ -49,6 +50,8 @@ def validate_config(cfg: Dict[str, Any]) -> List[str]:
         errors.append("account.risk_per_trade_pct must be > 0")
     if paper_risk_usd is not None and float(paper_risk_usd) <= 0:
         errors.append("account.paper_risk_usd must be > 0")
+    if max_position_pct is not None and not (0 < float(max_position_pct) <= 1):
+        errors.append("account.max_position_pct must be > 0 and <= 1")
     daily_loss_limit_r = ll.get("daily_loss_limit_r")
     if daily_loss_limit_r is not None and float(daily_loss_limit_r) <= 0:
         errors.append("live_loop.daily_loss_limit_r must be > 0 when provided")

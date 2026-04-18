@@ -71,6 +71,12 @@ class ConfigValidationTests(unittest.TestCase):
         errors = validate_config(cfg)
         self.assertTrue(any("paper_risk_usd" in e for e in errors))
 
+    def test_invalid_max_position_pct_detected(self) -> None:
+        cfg = _valid_config()
+        cfg["account"]["max_position_pct"] = 1.5
+        errors = validate_config(cfg)
+        self.assertTrue(any("max_position_pct" in e for e in errors))
+
     def test_non_positive_daily_loss_limit_detected(self) -> None:
         cfg = _valid_config()
         cfg["live_loop"]["daily_loss_limit_r"] = 0.0

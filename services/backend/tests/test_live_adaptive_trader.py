@@ -445,6 +445,15 @@ class LiveAdaptivePaperTraderTests(unittest.TestCase):
         trader = _trader(_config())
         self.assertEqual(trader._break_even_stop_price("SHORT", 100.0, 2.0, 0.05), 99.9)
 
+    def test_effective_wait_minutes_preserves_candle_budget(self) -> None:
+        cfg = _config()
+        cfg["live_loop"]["max_wait_candles"] = 6
+        cfg["live_loop"]["max_wait_minutes_per_trade"] = 45
+        trader = _trader(cfg)
+
+        self.assertEqual(trader._effective_wait_minutes(15), 90)
+        self.assertEqual(trader._effective_wait_minutes(60), 360)
+
     def test_signal_score_multiplier_penalizes_crossover_and_boosts_pullback(self) -> None:
         trader = _trader(_config())
         self.assertLess(trader._signal_score_multiplier("CROSSOVER"), 1.0)

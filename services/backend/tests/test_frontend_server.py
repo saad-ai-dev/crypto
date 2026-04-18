@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from services.frontend.server import AnalyticsEngine, EventStateCache, TradeHistoryCache
+from services.frontend.server import AnalyticsEngine, EventStateCache, NewsFetcher, TradeHistoryCache
 
 
 class TradeHistoryCacheTests(unittest.TestCase):
@@ -65,6 +65,42 @@ class TradeHistoryCacheTests(unittest.TestCase):
             self.assertEqual(open_trade["closed_result"], "LOSS")
             self.assertAlmostEqual(open_trade["closed_pnl_usd"], -0.54600002, places=6)
             self.assertFalse(open_trade["binance_executed"])
+
+
+class NewsFetcherTests(unittest.TestCase):
+    def test_parse_items_extracts_summary_and_sorts_by_publish_time(self) -> None:
+        xml = """
+        <rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+          <channel>
+            <item>
+              <title>Older headline</title>
+              <link>https://example.com/older</link>
+              <pubDate>Fri, 18 Apr 2026 07:00:00 GMT</pubDate>
+              <description><![CDATA[<p>Older summary text</p>]]></description>
+            </item>
+            <item>
+              <title>Fresh headline</title>
+              <link>https://example.com/fresh</link>
+              <pubDate>Fri, 18 Apr 2026 09:30:00 GMT</pubDate>
+              <content:encoded><![CDATA[<div>Fresh market summary with <strong>details</strong>.</div>]]></content:encoded>
+            </item>
+          </channel>
+        </rss>
+        """
+        fetcher = NewsFetcher(refresh_seconds=10, max_items=10)
+        items = fetcher._parse_items(xml, "Example")
+
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0]["title"], "Older headline")
+        self.assertEqual(items[0]["summary"], "Older summary text")
+        self.assertEqual(items[1]["summary"], "Fresh market summary with details.")
+        self.assertIsInstance(items[1]["published_ts"], int)
+
+        fetcher._read_url = lambda _url, timeout_sec=6: xml  # type: ignore[assignment]
+        payload = fetcher.refresh(force=True)
+        self.assertEqual(payload["items"][0]["title"], "Fresh headline")
+        self.assertEqual(payload["newest_published_at"], "2026-04-18T09:30:00+00:00")
+        self.assertGreater(payload["newest_published_ts"], payload["items"][1]["published_ts"])
 
     def test_event_state_marks_trade_result_as_not_binance_open(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

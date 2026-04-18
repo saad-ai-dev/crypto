@@ -9,6 +9,7 @@ class BinanceExecutorTests(unittest.TestCase):
         config = {
             "account": {
                 "risk_per_trade_pct": 0.02,
+                "max_position_pct": 0.1,
             }
         }
 
@@ -24,7 +25,7 @@ class BinanceExecutorTests(unittest.TestCase):
 
         self.assertTrue(executor.enabled)
         self.assertAlmostEqual(executor.risk_per_trade_usd, 5.0)
-        self.assertAlmostEqual(executor.max_position_usd, 12.5)
+        self.assertAlmostEqual(executor.max_position_usd, 25.0)
 
 
 if __name__ == "__main__":

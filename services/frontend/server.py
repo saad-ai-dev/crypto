@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import re
 import json
 import sys
 import threading
@@ -10,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import sha1
+from html import unescape
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1140,7 +1142,7 @@ class NewsFetcher:
         }
 
     @staticmethod
-    def _to_iso_date(value: Optional[str]) -> Optional[str]:
+    def _to_datetime(value: Optional[str]) -> Optional[datetime]:
         if not value:
             return None
         raw = str(value).strip()
@@ -1150,10 +1152,55 @@ class NewsFetcher:
             dt = parsedate_to_datetime(raw)
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc).isoformat()
+            return dt.astimezone(timezone.utc)
         except Exception:
-            # Keep unknown but non-empty date values so UI can still display context.
-            return raw
+            return None
+
+    @classmethod
+    def _to_iso_date(cls, value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+        dt = cls._to_datetime(raw)
+        if dt is not None:
+            return dt.isoformat()
+        # Keep unknown but non-empty date values so UI can still display context.
+        return raw
+
+    @classmethod
+    def _to_epoch_ms(cls, value: Optional[str]) -> Optional[int]:
+        dt = cls._to_datetime(value)
+        if dt is None:
+            return None
+        return int(dt.timestamp() * 1000)
+
+    @staticmethod
+    def _clean_text(value: Optional[str], limit: int = 240) -> str:
+        raw = unescape(str(value or ""))
+        if not raw.strip():
+            return ""
+        stripped = re.sub(r"<[^>]+>", " ", raw)
+        stripped = re.sub(r"\s+", " ", stripped).strip()
+        stripped = re.sub(r"\s+([,.;:!?])", r"\1", stripped)
+        if len(stripped) <= limit:
+            return stripped
+        return stripped[: limit - 1].rstrip() + "…"
+
+    def _extract_summary(self, node: ET.Element) -> str:
+        candidates = [
+            node.findtext("description"),
+            node.findtext("summary"),
+            node.findtext("{http://purl.org/rss/1.0/modules/content/}encoded"),
+            node.findtext("{http://www.w3.org/2005/Atom}summary"),
+            node.findtext("{http://www.w3.org/2005/Atom}content"),
+        ]
+        for candidate in candidates:
+            cleaned = self._clean_text(candidate)
+            if cleaned:
+                return cleaned
+        return ""
 
     @staticmethod
     def _read_url(url: str, timeout_sec: int = 6) -> str:
@@ -1174,6 +1221,8 @@ class NewsFetcher:
                 title = (node.findtext("title") or "").strip()
                 link = (node.findtext("link") or "").strip()
                 published = self._to_iso_date(node.findtext("pubDate"))
+                published_ts = self._to_epoch_ms(node.findtext("pubDate"))
+                summary = self._extract_summary(node)
                 if not title and not link:
                     continue
                 items.append(
@@ -1182,6 +1231,8 @@ class NewsFetcher:
                         "title": title or "(untitled)",
                         "link": link,
                         "published_at": published,
+                        "published_ts": published_ts,
+                        "summary": summary,
                     }
                 )
             return items
@@ -1196,6 +1247,10 @@ class NewsFetcher:
             published = self._to_iso_date(node.findtext("atom:published", "", atom_ns))
             if not published:
                 published = self._to_iso_date(node.findtext("atom:updated", "", atom_ns))
+            published_ts = self._to_epoch_ms(node.findtext("atom:published", "", atom_ns))
+            if published_ts is None:
+                published_ts = self._to_epoch_ms(node.findtext("atom:updated", "", atom_ns))
+            summary = self._extract_summary(node)
             if not title and not link:
                 continue
             items.append(
@@ -1204,6 +1259,8 @@ class NewsFetcher:
                     "title": title or "(untitled)",
                     "link": link,
                     "published_at": published,
+                    "published_ts": published_ts,
+                    "summary": summary,
                 }
             )
         return items
@@ -1242,8 +1299,17 @@ class NewsFetcher:
                 seen.add(key)
                 deduped.append(item)
 
-            deduped.sort(key=lambda it: str(it.get("published_at") or ""), reverse=True)
+            deduped.sort(
+                key=lambda it: (
+                    int(it.get("published_ts") or 0),
+                    str(it.get("published_at") or ""),
+                    str(it.get("title") or ""),
+                ),
+                reverse=True,
+            )
             generated_at = datetime.now(timezone.utc).isoformat()
+            newest_published_at = next((item.get("published_at") for item in deduped if item.get("published_at")), None)
+            newest_published_ts = next((item.get("published_ts") for item in deduped if item.get("published_ts")), None)
 
             self._cache = {
                 "generated_at": generated_at,
@@ -1251,6 +1317,8 @@ class NewsFetcher:
                 "items": deduped[: self.max_items],
                 "errors": errors[:20],
                 "sources": [f["source"] for f in self.DEFAULT_FEEDS],
+                "newest_published_at": newest_published_at,
+                "newest_published_ts": newest_published_ts,
             }
             self._last_fetch_mono = now_mono
             return copy.deepcopy(self._cache)

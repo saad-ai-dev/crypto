@@ -1006,6 +1006,10 @@ class LiveAdaptivePaperTrader:
             return max(1, int(raw[:-1] or "1")) * 1440
         return 1
 
+    def _effective_wait_minutes(self, timeframe_minutes: int) -> int:
+        candle_based_wait = self.max_wait_candles * timeframe_minutes
+        return max(self.max_wait_minutes_per_trade, candle_based_wait, timeframe_minutes * 2)
+
     def _wait_for_close(self, signal: Signal) -> ClosedTrade:
         engine = TradeEngine(risk_usd=self.risk_usd)
         opened = engine.maybe_open_trade(signal)
@@ -1014,9 +1018,8 @@ class LiveAdaptivePaperTrader:
 
         start = time.time()
         timeframe_minutes = self._timeframe_minutes(signal.timeframe)
-        # Use candle-based timeout: max_wait_candles * timeframe, capped by max_wait_minutes
-        candle_based_wait = self.max_wait_candles * timeframe_minutes
-        effective_wait_minutes = min(self.max_wait_minutes_per_trade, max(candle_based_wait, timeframe_minutes * 2))
+        # Never let the hard safety timeout undercut the candle budget for the trade.
+        effective_wait_minutes = self._effective_wait_minutes(timeframe_minutes)
         max_wait_seconds = effective_wait_minutes * 60
         last_seen_close_ms = signal.signal_time_ms
         best_r = 0.0
@@ -1435,8 +1438,7 @@ class LiveAdaptivePaperTrader:
             raise RuntimeError("Failed to open paper trade")
 
         timeframe_minutes = self._timeframe_minutes(signal.timeframe)
-        candle_based_wait = self.max_wait_candles * timeframe_minutes
-        effective_wait_minutes = min(self.max_wait_minutes_per_trade, max(candle_based_wait, timeframe_minutes * 2))
+        effective_wait_minutes = self._effective_wait_minutes(timeframe_minutes)
         return ManagedTrade(
             signal=signal,
             engine=engine,

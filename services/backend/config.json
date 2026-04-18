@@ -1,7 +1,9 @@
 {
   "account": {
     "starting_balance_usd": 10.0,
-    "risk_per_trade_pct": 0.02
+    "risk_per_trade_pct": 0.02,
+    "paper_risk_usd": 1.5,
+    "max_position_pct": 0.1
   },
   "execution": {
     "fee_bps_per_side": 2,
@@ -43,7 +45,14 @@
     "crossover_long_rsi_min": 55,
     "crossover_short_rsi_max": 45,
     "pullback_min_trend_strength": 0.001,
-    "pullback_confirmation_slack_pct": 0.002,
+    "pullback_confirmation_slack_pct": 0.003,
+    "pullback_risk_reward": 2.1,
+    "pullback_stop_lookback": 6,
+    "pullback_stop_buffer_atr": 0.8,
+    "structure_stop_max_atr": 4.0,
+    "rejection_wick_to_body_ratio": 1.2,
+    "rejection_close_position_threshold": 0.45,
+    "rejection_extreme_tolerance_atr": 0.3,
     "crossover_max_drift_atr": 0.9,
     "volume_ratio_min": 0.35,
     "ema_trend": 200,
@@ -118,7 +127,7 @@
     "klines_window_size": 60,
     "poll_seconds": 12,
     "max_wait_candles": 6,
-    "max_wait_minutes_per_trade": 45,
+    "max_wait_minutes_per_trade": 90,
     "min_rr_floor": 0.65,
     "min_trend_strength": 0.0012,
     "max_parallel_candidates": 1000,
@@ -161,8 +170,8 @@
     "min_symbol_expectancy_r_for_entry": 0.0,
     "min_open_interest_notional_usd": 0.0,
     "enable_trailing_stop": true,
-    "trail_trigger_r": 0.5,
-    "trail_keep_pct": 0.75,
+    "trail_trigger_r": 1.0,
+    "trail_keep_pct": 0.5,
     "max_adverse_r_cut": 0.5,
     "max_stagnation_bars": 5,
     "min_progress_r_for_stagnation": 0.1,

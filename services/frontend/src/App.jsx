@@ -71,6 +71,20 @@ function fmtTime(value) {
   return d.toLocaleString();
 }
 
+function fmtRelativeTime(value) {
+  if (!value) return "-";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  const diffMs = Date.now() - d.getTime();
+  const diffMinutes = Math.round(diffMs / 60000);
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.round(diffHours / 24);
+  return `${diffDays}d ago`;
+}
+
 function timeframeMinutes(tf) {
   if (!tf) return null;
   const match = tf.match(/^(\d+)(m|h|d)$/i);
@@ -721,6 +735,7 @@ function HomePage({ desk }) {
   const spotlightTrade = openTrade || possibleTrades[0] || null;
   const spotlightPrice = desk.state?.market?.find((row) => row.symbol === spotlightTrade?.symbol)?.price;
   const spotlightTime = spotlightTrade?.updated_at || spotlightTrade?.time || null;
+  const headlineItems = (desk.news?.items || []).slice(0, 3);
 
   const overviewCards = [
     { label: "Desk Status", value: desk.state?.status || "WAITING", hint: "Realtime backend state" },
@@ -849,6 +864,42 @@ function HomePage({ desk }) {
         <QuickPageCard to="/history" title="History" copy="Review stored trade outcomes with cleaner result formatting." />
         <QuickPageCard to="/news" title="News" copy="Read the market headlines in a dedicated decision-support page." />
         <QuickPageCard to="/controls" title="Controls" copy="Manage active symbol focus and the runtime watchlist." />
+      </motion.section>
+
+      <motion.section className="two-column" {...pageMotion}>
+        <motion.article className="feature-panel" whileHover={{ y: -4 }}>
+          <div className="panel-topline">
+            <span>Fresh Headlines</span>
+            <span>{desk.news?.newest_published_at ? `${fmtRelativeTime(desk.news.newest_published_at)} latest` : fmtTime(desk.news?.generated_at)}</span>
+          </div>
+          <div className="trade-list">
+            {headlineItems.map((item) => (
+              <a key={`${item.link}-${item.title}`} className="trade-item" href={item.link} target="_blank" rel="noreferrer">
+                <div>
+                  <strong>{item.title}</strong>
+                  <p>{item.summary || "Open the article for full details."}</p>
+                  <div className="trade-runtime compact">
+                    <span>{item.source || "Source"}</span>
+                    <span>{fmtRelativeTime(item.published_at)}</span>
+                  </div>
+                </div>
+              </a>
+            ))}
+            {!headlineItems.length && <p className="empty-text">News is loading or no fresh headlines are available yet.</p>}
+          </div>
+        </motion.article>
+        <motion.article className="feature-panel" whileHover={{ y: -4 }}>
+          <div className="panel-topline">
+            <span>News Feed Status</span>
+            <span>{desk.news?.count || 0} items</span>
+          </div>
+          <div className="detail-grid">
+            <Stat label="Fetched" value={fmtTime(desk.news?.generated_at)} />
+            <Stat label="Latest Story" value={fmtRelativeTime(desk.news?.newest_published_at)} />
+            <Stat label="Sources" value={String((desk.news?.sources || []).length)} />
+            <Stat label="Source Errors" value={String((desk.news?.errors || []).length)} />
+          </div>
+        </motion.article>
       </motion.section>
     </>
   );
@@ -1288,7 +1339,7 @@ function NewsPage({ desk }) {
       (desk.news?.items || []).filter((item) => {
         const q = deferredNewsSearch.trim().toLowerCase();
         if (!q) return true;
-        return `${item.title || ""} ${item.source || ""}`.toLowerCase().includes(q);
+        return `${item.title || ""} ${item.source || ""} ${item.summary || ""}`.toLowerCase().includes(q);
       }),
     [desk.news, deferredNewsSearch]
   );
@@ -1298,20 +1349,21 @@ function NewsPage({ desk }) {
       <motion.article className="feature-panel" {...pageMotion}>
         <div className="panel-topline">
           <span>Market News</span>
-          <span>{fmtTime(desk.news?.generated_at)}</span>
+          <span>{desk.news?.newest_published_at ? `${fmtRelativeTime(desk.news.newest_published_at)} latest` : fmtTime(desk.news?.generated_at)}</span>
         </div>
         <input
           className="surface-input"
           value={newsSearch}
           onChange={(event) => setNewsSearch(event.target.value)}
-          placeholder="Filter headlines or source"
+          placeholder="Filter headlines, source, or summary"
         />
         <div className="news-grid">
           {filteredNews.slice(0, 12).map((item) => (
             <a key={`${item.link}-${item.title}`} className="news-card" href={item.link} target="_blank" rel="noreferrer">
               <span>{item.source || "Source"}</span>
               <strong>{item.title}</strong>
-              <small>{fmtTime(item.published_at)}</small>
+              <p>{item.summary || "Open the source article for full context."}</p>
+              <small>{fmtTime(item.published_at)} · {fmtRelativeTime(item.published_at)}</small>
             </a>
           ))}
           {!filteredNews.length && <p className="empty-text">No headlines match the current filter.</p>}

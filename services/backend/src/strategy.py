@@ -43,6 +43,13 @@ class StrategyParameters:
     crossover_max_drift_atr: float = 0.5
     pullback_min_trend_strength: float = 0.003
     pullback_confirmation_slack_pct: float = 0.0
+    pullback_risk_reward: float = 0.0
+    pullback_stop_lookback: int = 6
+    pullback_stop_buffer_atr: float = 0.8
+    structure_stop_max_atr: float = 4.0
+    rejection_wick_to_body_ratio: float = 1.2
+    rejection_close_position_threshold: float = 0.45
+    rejection_extreme_tolerance_atr: float = 0.3
     volume_ratio_min: float = 0.5
     ema_trend: int = 0  # 0 = disabled; set to e.g. 200 to only trade with macro trend
     # Regime detection parameters
@@ -92,6 +99,8 @@ class MarketStructure:
     resistance_touches: int
     hvn_support: Optional[float]
     hvn_resistance: Optional[float]
+    recent_swing_low: Optional[float] = None
+    recent_swing_high: Optional[float] = None
 
 
 class RegimeDetector:
@@ -212,6 +221,13 @@ class StrategyEngine:
             crossover_max_drift_atr=float(payload.get("crossover_max_drift_atr", 0.5)),
             pullback_min_trend_strength=float(payload.get("pullback_min_trend_strength", 0.003)),
             pullback_confirmation_slack_pct=float(payload.get("pullback_confirmation_slack_pct", 0.0)),
+            pullback_risk_reward=float(payload.get("pullback_risk_reward", payload.get("risk_reward", 1.5))),
+            pullback_stop_lookback=int(payload.get("pullback_stop_lookback", 6)),
+            pullback_stop_buffer_atr=float(payload.get("pullback_stop_buffer_atr", 0.8)),
+            structure_stop_max_atr=float(payload.get("structure_stop_max_atr", 4.0)),
+            rejection_wick_to_body_ratio=float(payload.get("rejection_wick_to_body_ratio", 1.2)),
+            rejection_close_position_threshold=float(payload.get("rejection_close_position_threshold", 0.45)),
+            rejection_extreme_tolerance_atr=float(payload.get("rejection_extreme_tolerance_atr", 0.3)),
             volume_ratio_min=float(payload.get("volume_ratio_min", 0.5)),
             ema_trend=int(payload.get("ema_trend", 0)),
             adx_period=int(payload.get("adx_period", 14)),
@@ -348,6 +364,11 @@ class StrategyEngine:
             if hvn_support is not None and hvn_resistance is not None:
                 break
 
+        recent_window_size = max(3, self.params.pullback_stop_lookback)
+        recent_window = candles[-recent_window_size:] if len(candles) > recent_window_size else candles
+        recent_swing_low = min((c.low for c in recent_window), default=None)
+        recent_swing_high = max((c.high for c in recent_window), default=None)
+
         return MarketStructure(
             support=support,
             resistance=resistance,
@@ -355,11 +376,20 @@ class StrategyEngine:
             resistance_touches=resistance_touches,
             hvn_support=hvn_support,
             hvn_resistance=hvn_resistance,
+            recent_swing_low=recent_swing_low,
+            recent_swing_high=recent_swing_high,
         )
 
     @staticmethod
     def _aligned_with_trend(side: str, trend_bias: str) -> bool:
         return trend_bias == "NEUTRAL" or (
+            (side == "LONG" and trend_bias == "BULL")
+            or (side == "SHORT" and trend_bias == "BEAR")
+        )
+
+    @staticmethod
+    def _strictly_aligned_with_trend(side: str, trend_bias: str) -> bool:
+        return (
             (side == "LONG" and trend_bias == "BULL")
             or (side == "SHORT" and trend_bias == "BEAR")
         )
@@ -483,6 +513,59 @@ class StrategyEngine:
         room = abs(target_reference - entry) / atr_v
         return room >= self.params.sr_min_room_atr
 
+    def _is_rejection_against_entry(
+        self,
+        side: str,
+        candles: List[Candle],
+        atr_v: float,
+        structure: MarketStructure,
+    ) -> bool:
+        if not candles or atr_v <= 0:
+            return False
+
+        last = candles[-1]
+        candle_range = last.high - last.low
+        if candle_range <= 0:
+            return False
+
+        body = abs(last.close - last.open)
+        upper_wick = last.high - max(last.open, last.close)
+        lower_wick = min(last.open, last.close) - last.low
+        close_position = (last.close - last.low) / candle_range
+        wick_threshold = max(body * self.params.rejection_wick_to_body_ratio, candle_range * 0.35)
+        extreme_tolerance = atr_v * self.params.rejection_extreme_tolerance_atr
+
+        resistance_ref = self._resistance_reference(structure)
+        support_ref = self._support_reference(structure)
+        near_recent_high = (
+            structure.recent_swing_high is not None
+            and last.high >= (structure.recent_swing_high - extreme_tolerance)
+        )
+        near_recent_low = (
+            structure.recent_swing_low is not None
+            and last.low <= (structure.recent_swing_low + extreme_tolerance)
+        )
+        near_resistance = (
+            (resistance_ref is not None and last.high >= (resistance_ref - extreme_tolerance))
+            or near_recent_high
+        )
+        near_support = (
+            (support_ref is not None and last.low <= (support_ref + extreme_tolerance))
+            or near_recent_low
+        )
+
+        if side == "LONG":
+            return (
+                near_resistance
+                and upper_wick >= wick_threshold
+                and close_position <= self.params.rejection_close_position_threshold
+            )
+        return (
+            near_support
+            and lower_wick >= wick_threshold
+            and close_position >= (1.0 - self.params.rejection_close_position_threshold)
+        )
+
     def _build_trade_levels(
         self,
         side: str,
@@ -496,6 +579,9 @@ class StrategyEngine:
         resistance_ref = self._resistance_reference(structure)
         stop_buffer = atr_v * self.params.sr_stop_buffer_atr
         target_buffer = atr_v * self.params.sr_target_buffer_atr
+        rr_multiplier = self.params.risk_reward
+        if signal_type == "PULLBACK":
+            rr_multiplier = max(self.params.risk_reward, self.params.pullback_risk_reward)
 
         if signal_type == "BB_REVERSION" and extra and "bb" in extra:
             _bb_upper, bb_mid, _bb_lower = extra["bb"][:3]
@@ -523,39 +609,73 @@ class StrategyEngine:
                 if support_ref is not None and support_ref < entry:
                     stop_loss = min(stop_loss, support_ref - stop_buffer)
                 sl_distance = max(entry - stop_loss, atr_v * 0.5)
-                take_profit = entry + sl_distance * self.params.risk_reward
+                take_profit = entry + sl_distance * rr_multiplier
             else:
                 stop_loss = st_val + atr_v * 0.2
                 if resistance_ref is not None and resistance_ref > entry:
                     stop_loss = max(stop_loss, resistance_ref + stop_buffer)
                 sl_distance = max(stop_loss - entry, atr_v * 0.5)
-                take_profit = entry - sl_distance * self.params.risk_reward
+                take_profit = entry - sl_distance * rr_multiplier
         else:
             sl_distance = atr_v * self.params.atr_multiplier
             if side == "LONG":
                 stop_loss = entry - sl_distance
-                if support_ref is not None and support_ref < entry:
-                    candidate = support_ref - stop_buffer
-                    if 0 < entry - candidate <= sl_distance * 2.0:
-                        stop_loss = candidate
-                sl_distance = max(entry - stop_loss, atr_v * 0.5)
-                take_profit = entry + (sl_distance * self.params.risk_reward)
+                if signal_type == "PULLBACK":
+                    structure_stop_limit = atr_v * self.params.structure_stop_max_atr
+                    swing_buffer = max(stop_buffer, atr_v * self.params.pullback_stop_buffer_atr)
+                    candidates = [stop_loss]
+                    if support_ref is not None and support_ref < entry:
+                        candidate = support_ref - stop_buffer
+                        if 0 < entry - candidate <= structure_stop_limit:
+                            candidates.append(candidate)
+                    if structure.recent_swing_low is not None and structure.recent_swing_low < entry:
+                        candidate = structure.recent_swing_low - swing_buffer
+                        if 0 < entry - candidate <= structure_stop_limit:
+                            candidates.append(candidate)
+                    stop_loss = min(candidates)
+                    sl_distance = max(entry - stop_loss, atr_v * 0.75)
+                else:
+                    if support_ref is not None and support_ref < entry:
+                        candidate = support_ref - stop_buffer
+                        if 0 < entry - candidate <= sl_distance * 2.0:
+                            stop_loss = candidate
+                    sl_distance = max(entry - stop_loss, atr_v * 0.5)
+                take_profit = entry + (sl_distance * rr_multiplier)
             else:
                 stop_loss = entry + sl_distance
-                if resistance_ref is not None and resistance_ref > entry:
-                    candidate = resistance_ref + stop_buffer
-                    if 0 < candidate - entry <= sl_distance * 2.0:
-                        stop_loss = candidate
-                sl_distance = max(stop_loss - entry, atr_v * 0.5)
-                take_profit = entry - (sl_distance * self.params.risk_reward)
+                if signal_type == "PULLBACK":
+                    structure_stop_limit = atr_v * self.params.structure_stop_max_atr
+                    swing_buffer = max(stop_buffer, atr_v * self.params.pullback_stop_buffer_atr)
+                    candidates = [stop_loss]
+                    if resistance_ref is not None and resistance_ref > entry:
+                        candidate = resistance_ref + stop_buffer
+                        if 0 < candidate - entry <= structure_stop_limit:
+                            candidates.append(candidate)
+                    if structure.recent_swing_high is not None and structure.recent_swing_high > entry:
+                        candidate = structure.recent_swing_high + swing_buffer
+                        if 0 < candidate - entry <= structure_stop_limit:
+                            candidates.append(candidate)
+                    stop_loss = max(candidates)
+                    sl_distance = max(stop_loss - entry, atr_v * 0.75)
+                else:
+                    if resistance_ref is not None and resistance_ref > entry:
+                        candidate = resistance_ref + stop_buffer
+                        if 0 < candidate - entry <= sl_distance * 2.0:
+                            stop_loss = candidate
+                    sl_distance = max(stop_loss - entry, atr_v * 0.5)
+                take_profit = entry - (sl_distance * rr_multiplier)
 
         if side == "LONG" and resistance_ref is not None and resistance_ref > entry:
             capped_tp = resistance_ref - target_buffer
-            if capped_tp > entry:
+            target_distance = take_profit - entry
+            should_cap = signal_type != "PULLBACK" or (capped_tp - entry) <= (target_distance * 0.5)
+            if capped_tp > entry and should_cap:
                 take_profit = min(take_profit, capped_tp)
         if side == "SHORT" and support_ref is not None and support_ref < entry:
             capped_tp = support_ref + target_buffer
-            if capped_tp < entry:
+            target_distance = entry - take_profit
+            should_cap = signal_type != "PULLBACK" or (entry - capped_tp) <= (target_distance * 0.5)
+            if capped_tp < entry and should_cap:
                 take_profit = max(take_profit, capped_tp)
 
         return (stop_loss, take_profit)
@@ -812,9 +932,11 @@ class StrategyEngine:
         elif allow_short and ema_fast_v < ema_slow_v:
             touch_dist = abs(candles[-1].high - ema_fast_v) / atr_v if atr_v else 999
             rejected = entry < ema_fast_v and prev_close >= ema_fast_v * 0.998
+            prev_was_pullback = prev_close >= prev2_close * (1 - self.params.pullback_confirmation_slack_pct)
+            bearish_reclaim = entry < prev_close and entry < candles[-1].open
             confirmed = (
-                prev_close <= prev2_close * (1 + self.params.pullback_confirmation_slack_pct)
-                and entry <= prev_close * (1 + self.params.pullback_confirmation_slack_pct)
+                prev_was_pullback
+                and bearish_reclaim
             )
             if (touch_dist < 1.0 or rejected) and confirmed and self.params.short_rsi_min <= rsi_v <= self.params.short_rsi_max:
                 return ("SHORT", "PULLBACK", {"st_aligned": st_direction == "DOWN"})
@@ -1090,6 +1212,12 @@ class StrategyEngine:
         if signal_type == "PULLBACK":
             if not self._aligned_with_trend(side, trend_bias):
                 note("pullback_macro_trend_blocked")
+                return None
+            if side == "SHORT" and not self._strictly_aligned_with_trend(side, trend_bias):
+                note("pullback_short_requires_bear_trend")
+                return None
+            if self._is_rejection_against_entry(side, candles, atr_v, structure):
+                note("pullback_structure_rejection")
                 return None
             if not self._is_near_structure(side, entry, atr_v, structure):
                 note("sr_pullback_not_supported")
